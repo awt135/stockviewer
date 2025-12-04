@@ -29,7 +29,9 @@ Python 3.9+
 #创建虚拟环境
 
 python -m venv venv
+
 source venv/bin/activate # linux / mac
+
 venv\Scripts\activate # windows
 
 #环境依赖
