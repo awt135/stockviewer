@@ -1,11 +1,11 @@
 # stockviewer
-一套轻量级的基于tradingview lightweight chats的股票指标分析系统，用来查看a股，港股，美股数据。
+一套基于 TradingView Lightweight Charts 的轻量级股票指标分析系统，支持查看 A 股、港股、美股行情数据。
 
-看到lightweight charts图表库在币市使用非常广泛，而国内a股数据使用却几乎没有。
-由于国内目前券商并没有接入tradingview视图的软件，也可能是a股数据接口十分昂贵造成的原因。
-但是tradingview的可视化图表和各种指标信息又非常的丰富好用。个人使用lightweight charts的各种图表库已经足够了。
-处于这个原因，打算作为一套轻量级的基于tradingview lightweight chats的股票指标分析系统，方便大家使用，同时方便本地获取和展示。
-同时所有自选股数据在本地浏览器端保留，确保了个人股票数据的安全性和隐私性。
+目前 Lightweight Charts 在加密货币市场中应用广泛，然而在国内 A 股领域却较少见到其使用。这一现象或许是由于国内券商尚未接入 TradingView 视图支持，亦或是 A 股数据接口成本较高所致。  
+但 TradingView 所提供的可视化图表与丰富指标确实强大易用。对于个人投资者而言，Lightweight Charts 的图表库已足够满足日常分析需求。
+为此，我们搭建了这套轻量级的股票指标分析系统，旨在为大家提供一个便捷的数据查看与展示工具。所有自选股数据均保存在本地浏览器端，无需上传服务器，有效保障个人股票数据的隐私与安全。
+欢迎各位开发者一同参与，共同完善这个项目。
+
 
 
 一、实现思路
@@ -17,23 +17,19 @@
 日内数据使用 腾讯股票接口
 
 
-安装部署
-
-
+#安装部署
 
 Python 3.9+
 
-创建虚拟环境
+#创建虚拟环境
 
 python -m venv venv
 source venv/bin/activate # linux / mac
 venv\Scripts\activate # windows
 
-
 #环境依赖
 
-pip install fastapi uvicorn akshare pandas numpy python-multipart
-
+pip install fastapi uvicorn akshare pandas numpy python-multipart pydantic aiohttp
 
 #后端
 
@@ -127,4 +123,3 @@ http://127.0.0.1:8001
 
 
 
-欢迎各位老
