@@ -4,6 +4,7 @@
 目前 Lightweight Charts 在加密货币市场中应用广泛，然而在国内 A 股领域却较少见到其使用。这一现象或许是由于国内券商尚未接入 TradingView 视图支持，亦或是 A 股数据接口成本较高所致。  
 但 TradingView 所提供的可视化图表与丰富指标确实强大易用。对于个人投资者而言，Lightweight Charts 的图表库已足够满足日常分析需求。
 为此，我们搭建了这套轻量级的股票指标分析系统，旨在为大家提供一个便捷的数据查看与展示工具。所有自选股数据均保存在本地浏览器端，无需上传服务器，有效保障个人股票数据的隐私与安全。
+
 欢迎各位开发者一同参与，共同完善这个项目。
 
 
@@ -43,7 +44,7 @@ http://127.0.0.1:8000/api/kline?symbol=sh600000&period=daily&limit=300
 #前端
 
 cd frontend
-python -m http.server 8081
+python -m http.server 8081   （查看下index.html页面里调用的 是否是上面的8000端口，要求一致）
 
 验证
 
