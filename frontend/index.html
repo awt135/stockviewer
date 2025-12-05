@@ -1370,6 +1370,21 @@ const bbiChart = LightweightCharts.createChart(document.getElementById('bbiChart
 });
 const bbiSeries = bbiChart.addSeries(LightweightCharts.LineSeries, { color: '#13c2c2', lineWidth: 2, title: 'BBI' });
 
+// 检查图表是否成功初始化
+const allCharts = [
+    mainChart, volumeChart, macdChart, rsiChart, skdjChart, mkChart,
+    strategyChart, obvChart, mfiChart, cciChart, rocChart, williamsChart,
+    kdjChart, trixChart, bbiChart
+];
+
+// 检查图表初始化状态
+console.log('图表初始化状态:', allCharts.map((chart, index) => ({
+    index,
+    initialized: !!chart,
+    hasTimeScale: chart && !!chart.timeScale,
+    hasSubscribeCrosshairMove: chart && !!chart.subscribeCrosshairMove
+})));
+
 
 
 // 全局变量存储当前K线数据
@@ -2264,11 +2279,21 @@ async function loadKline(symbol) {
         
         // 数据设置完成后，同步所有图表的时间轴
         setTimeout(() => {
-            syncAllCharts();
-        }, 100);
+            try {
+                syncAllCharts();
+            } catch (error) {
+                console.warn('初始同步图表失败:', error);
+            }
+        }, 200);
         
-        // 设置交叉线同步
-        setupCrosshairSync();
+        // 设置交叉线同步（延迟执行以确保图表完全加载）
+        setTimeout(() => {
+            try {
+                setupCrosshairSync();
+            } catch (error) {
+                console.warn('设置交叉线同步失败:', error);
+            }
+        }, 300);
         
     } catch (err) {
         console.error('加载 K线数据失败', err);
@@ -2498,34 +2523,60 @@ document.getElementById('showBbi').addEventListener('change', updateIndicatorsVi
 // 窗口大小变化时重新调整图表大小和联动
 window.addEventListener('resize', () => {
     const chartWidth = getChartWidth();
-    const allCharts = [mainChart, volumeChart, macdChart, rsiChart, skdjChart, mkChart, strategyChart, obvChart, mfiChart, cciChart, rocChart, williamsChart, kdjChart, trixChart, bbiChart];
+    const allCharts = [
+        mainChart, volumeChart, macdChart, rsiChart, skdjChart, mkChart,
+        strategyChart, obvChart, mfiChart, cciChart, rocChart, williamsChart,
+        kdjChart, trixChart, bbiChart
+    ];
 
-    allCharts.forEach(chart => {
-        if (chart) {
-            chart.applyOptions({ width: chartWidth });
+    allCharts.forEach((chart, index) => {
+        if (chart && typeof chart.applyOptions === 'function') {
+            try {
+                chart.applyOptions({ width: chartWidth });
+            } catch (error) {
+                console.warn(`调整图表 ${index} 大小失败:`, error);
+            }
         }
     });
 
-    // 重新同步时间轴
-    syncAllCharts();
+    // 延迟重新同步时间轴
+    setTimeout(() => {
+        try {
+            syncAllCharts();
+        } catch (error) {
+            console.warn('窗口调整后同步图表失败:', error);
+        }
+    }, 100);
 });
 
 // 同步所有图表的时间轴
 function syncAllCharts() {
     try {
-        const mainRange = mainChart.timeScale().getVisibleRange();
-        if (mainRange && mainRange.from !== null && mainRange.to !== null) {
-            const allCharts = [volumeChart, macdChart, rsiChart, skdjChart, mkChart, strategyChart, obvChart, mfiChart, cciChart, rocChart, williamsChart, kdjChart, trixChart, bbiChart];
-            allCharts.forEach(chart => {
-                if (chart && chart.timeScale) {
-                    try {
-                        chart.timeScale().setVisibleRange(mainRange);
-                    } catch (error) {
-                        console.warn('同步图表时间轴失败:', error);
-                    }
+        const mainTimeScale = mainChart.timeScale();
+        if (!mainTimeScale) return;
+        
+        const mainRange = mainTimeScale.getVisibleRange();
+        if (!mainRange || mainRange.from === null || mainRange.to === null) return;
+        
+        const allCharts = [
+            volumeChart, macdChart, rsiChart, skdjChart, mkChart, strategyChart,
+            obvChart, mfiChart, cciChart, rocChart, williamsChart, kdjChart,
+            trixChart, bbiChart
+        ];
+        
+        allCharts.forEach(chart => {
+            if (!chart || !chart.timeScale) return;
+            
+            try {
+                const timeScale = chart.timeScale();
+                if (timeScale && typeof timeScale.setVisibleRange === 'function') {
+                    timeScale.setVisibleRange(mainRange);
                 }
-            });
-        }
+            } catch (error) {
+                console.warn('同步图表时间轴失败:', chart, error);
+                // 忽略单个图表的同步错误
+            }
+        });
     } catch (error) {
         console.warn('获取主图时间轴范围失败:', error);
     }
@@ -2534,31 +2585,49 @@ function syncAllCharts() {
 // 设置交叉线同步功能
 function setupCrosshairSync() {
     // 定义所有需要同步的图表
-    const allCharts = [mainChart, volumeChart, macdChart, rsiChart, skdjChart, mkChart, strategyChart, obvChart, mfiChart, cciChart, rocChart, williamsChart, kdjChart, trixChart, bbiChart];
+    const allCharts = [
+        mainChart, volumeChart, macdChart, rsiChart, skdjChart, mkChart,
+        strategyChart, obvChart, mfiChart, cciChart, rocChart, williamsChart,
+        kdjChart, trixChart, bbiChart
+    ];
+    
+    // 检查每个图表是否支持交叉线移动事件
+    const validCharts = allCharts.filter(chart => 
+        chart && chart.subscribeCrosshairMove
+    );
+    
+    if (validCharts.length === 0) {
+        console.warn('没有找到支持交叉线同步的图表');
+        return;
+    }
     
     // 为每个图表设置交叉线同步
-    allCharts.forEach(chart => {
-        if (!chart) return;
-        
-        // 订阅交叉线移动事件
-        chart.subscribeCrosshairMovement((param) => {
-            // 获取当前鼠标位置的时间点
-            const time = param.time;
-            
-            if (!time) return;
-            
-            // 同步所有其他图表到相同的时间点
-            allCharts.forEach(otherChart => {
-                if (otherChart && otherChart !== chart) {
-                    try {
-                        // 设置交叉线位置
-                        otherChart.setCrosshairPosition(param.point.x, param.point.y, param.series);
-                    } catch (error) {
-                        // 忽略同步错误
+    validCharts.forEach(chart => {
+        try {
+            chart.subscribeCrosshairMove((param) => {
+                // 获取当前鼠标位置的时间点
+                const time = param.time;
+                
+                if (!time) return;
+                
+                // 同步所有其他图表到相同的时间点
+                validCharts.forEach(otherChart => {
+                    if (otherChart && otherChart !== chart) {
+                        try {
+                            // 设置交叉线位置
+                            if (otherChart.setCrosshairPosition) {
+                                otherChart.setCrosshairPosition(param.point.x, param.point.y, param.series);
+                            }
+                        } catch (error) {
+                            // 忽略同步错误
+                            console.debug('交叉线同步失败:', error);
+                        }
                     }
-                }
+                });
             });
-        });
+        } catch (error) {
+            console.warn('订阅交叉线移动事件失败:', chart, error);
+        }
     });
 }
 
@@ -2566,7 +2635,19 @@ function setupCrosshairSync() {
 // 同步操作将在loadKline函数的数据设置完成后执行
 
 // 监听主图时间轴变化，自动同步所有附图
-mainChart.timeScale().subscribeVisibleTimeRangeChange(syncAllCharts);
+if (mainChart && mainChart.timeScale) {
+    try {
+        mainChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
+            try {
+                syncAllCharts();
+            } catch (error) {
+                console.warn('时间轴变化时同步失败:', error);
+            }
+        });
+    } catch (error) {
+        console.warn('订阅时间轴变化事件失败:', error);
+    }
+}
 
 // 添加键盘快捷键支持
 window.addEventListener('keydown', (e) => {
