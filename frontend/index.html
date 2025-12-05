@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>A股自选 + K线图 V0.5版</title>
+<title>A股自选 + K线图 V0.6版</title>
 <!-- 引入jQuery和Bootstrap -->
 <script src="jquery-3.6.0.min.js"></script>
 <link href="bootstrap.min.css" rel="stylesheet">
@@ -108,13 +108,15 @@
     
     .chart-header {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
     margin-bottom: 15px;
     padding: 10px;
     background: #f8f9fa;
     border-radius: 8px;
     border: 1px solid #e9ecef;
+    gap: 10px;
 }
 
 .stock-title {
@@ -136,6 +138,57 @@
     padding: 4px 8px;
     border-radius: 4px;
     border: 1px solid #91d5ff;
+}
+
+.stock-details {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-left: 15px;
+    flex: 1;
+    min-width: 0; /* 允许内容收缩 */
+}
+
+.stock-industry {
+    font-size: 14px;
+    color: #1890ff;
+    background: #e6f7ff;
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid #91d5ff;
+    max-width: 600px;
+    white-space: normal;
+    word-wrap: break-word;
+    overflow: visible;
+    line-height: 1.4;
+}
+
+.stock-concepts {
+    font-size: 14px;
+    color: #722ed1;
+    background: #f9f0ff;
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid #d3adf7;
+    max-width: 600px;
+    white-space: normal;
+    word-wrap: break-word;
+    overflow: visible;
+    line-height: 1.4;
+}
+
+.stock-description {
+    font-size: 12px;
+    color: #8c8c8c;
+    background: #fafafa;
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid #d9d9d9;
+    max-width: 500px;
+    white-space: normal;
+    word-wrap: break-word;
+    overflow: visible;
+    line-height: 1.4;
 }
 
 .chart-controls {
@@ -319,6 +372,66 @@
     #mainChart {
         position: relative;
     }
+    
+    /* 股票详情信息样式 */
+    .stock-details {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 15px;
+        margin: 5px 0;
+        font-size: 12px;
+        color: #666;
+    }
+    
+    .stock-details span {
+        background: #f0f0f0;
+        padding: 2px 8px;
+        border-radius: 3px;
+        border-left: 3px solid #1890ff;
+    }
+    
+    /* 人气排名样式 */
+    .hot-rank-details {
+        margin: 10px 0;
+        padding: 8px;
+        background: #f8f9fa;
+        border-radius: 4px;
+        border: 1px solid #e9ecef;
+    }
+    
+    .hot-rank-header {
+        font-size: 12px;
+        font-weight: bold;
+        color: #495057;
+        margin-bottom: 5px;
+        border-bottom: 1px solid #dee2e6;
+        padding-bottom: 3px;
+    }
+    
+    .hot-rank-list {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+    }
+    
+    .hot-rank-item {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        padding: 2px 5px;
+        background: white;
+        border-radius: 2px;
+        border: 1px solid #e9ecef;
+    }
+    
+    .hot-rank-item .rank-time {
+        color: #6c757d;
+    }
+    
+    .hot-rank-item .rank-value {
+        font-weight: bold;
+        color: #1890ff;
+    }
  </style>
  </head>
 <body>
@@ -374,6 +487,21 @@
                 <div class="stock-title">
                     <span id="stockName" class="stock-name">--</span>
                     <span id="stockCode" class="stock-code">--</span>
+                </div>
+                <div class="stock-details">
+                    <span id="stockIndustry" class="stock-industry">行业：--</span>
+                    <span id="stockConcepts" class="stock-concepts">概念：--</span>
+                    <span id="stockProvincial" class="stock-provincial">省份：--</span>
+                    <span id="stockClassi" class="stock-classi">分类：--</span>
+                    <span id="stockDescription" class="stock-description">描述：--</span>
+                </div>
+                <div class="hot-rank-details">
+                    <div class="hot-rank-header">
+                        <a href="#" id="currentRankLink" target="_blank" class="rank-link">最新人气排名</a>
+                    </div>
+                    <div id="hotRankList" class="hot-rank-list">
+                        <div class="hot-rank-item">暂无数据</div>
+                    </div>
                 </div>
                 <div class="chart-controls">
                     <h3>K线图</h3>
@@ -1440,9 +1568,94 @@ async function loadKline(symbol) {
         
         if (stockInfoRes.ok) {
             const stockInfo = stockInfoJson.data;
+            
+            // 获取热门概念信息
+            let conceptsText = '概念信息暂不可用';
+            try {
+                const conceptsResponse = await fetch(`http://127.0.0.1:8000/api/stock_hot_keyword_em?symbol=${processedSymbol}`);
+                if (conceptsResponse.ok) {
+                    const conceptsJson = await conceptsResponse.json();
+                    console.log('概念接口返回数据:', conceptsJson);
+                    
+                    // 支持多种数据结构
+                    if (conceptsJson && Array.isArray(conceptsJson) && conceptsJson.length > 0) {
+                        // 直接返回数组的情况
+                        const topConcepts = conceptsJson.slice(0, 3);
+                        conceptsText = topConcepts.map(item => item.概念名称 || item.concept_name || '未知概念').join('、');
+                    } else if (conceptsJson.data && conceptsJson.data.length > 0) {
+                        // 返回包含data字段的情况
+                        const topConcepts = conceptsJson.data.slice(0, 3);
+                        conceptsText = topConcepts.map(item => item.概念名称 || item.concept_name || '未知概念').join('、');
+                    } else if (conceptsJson && conceptsJson.length === 0) {
+                        conceptsText = '暂无概念数据';
+                    }
+                    
+                    console.log('最终概念文本:', conceptsText);
+                } else {
+                    console.error('概念接口请求失败:', conceptsResponse.status);
+                }
+            } catch (e) {
+                console.error('获取概念信息失败:', e);
+            }
             // 更新标题区域
             document.getElementById('stockName').textContent = stockInfo.name;
             document.getElementById('stockCode').textContent = processedSymbol;
+            
+            // 更新概念信息
+            document.getElementById('stockConcepts').textContent = `概念：${conceptsText}`;
+            
+            // 更新行业、省份、分类信息（在一行显示）
+            // 行业信息只取ind_name的值，处理字符串格式的industry数据
+            let industryName = '行业信息暂不可用';
+            if (stockInfo.industry) {
+                try {
+                    // 尝试解析字符串格式的industry数据
+                    if (typeof stockInfo.industry === 'string' && stockInfo.industry.startsWith('{')) {
+                        const industryObj = JSON.parse(stockInfo.industry.replace(/'/g, '"'));
+                        industryName = industryObj.ind_name || industryName;
+                    } else if (stockInfo.industry.ind_name) {
+                        industryName = stockInfo.industry.ind_name;
+                    } else {
+                        industryName = stockInfo.industry;
+                    }
+                } catch (e) {
+                    industryName = stockInfo.industry;
+                }
+            }
+            const provincialName = stockInfo.provincial_name || '省级信息暂不可用';
+            const classiName = stockInfo.classi_name || '分类信息暂不可用';
+            
+            // 将行业、省份、分类信息合并显示在一行
+            document.getElementById('stockIndustry').textContent = `行业：${industryName} | 省份：${provincialName} | 分类：${classiName}`;
+            
+            // 隐藏省份和分类的单独显示元素
+            document.getElementById('stockProvincial').style.display = 'none';
+            document.getElementById('stockClassi').style.display = 'none';
+            
+            // 更新股票描述
+            document.getElementById('stockDescription').textContent = `描述：${stockInfo.description || '股票描述暂不可用'}`;
+            
+            // 更新当前排名超链接
+            const currentRankLink = document.getElementById('currentRankLink');
+            const stockCode = processedSymbol.replace('sz', '').replace('sh', '');
+            currentRankLink.href = `https://guba.eastmoney.com/rank/stock?code=${stockCode}`;
+            
+            // 更新人气排名 - 只显示最新一条数据
+            const hotRankList = document.getElementById('hotRankList');
+            if (stockInfo.hot_rank && stockInfo.hot_rank.length > 0) {
+                // 取最后一条数据（最新排名）
+                const latestRank = stockInfo.hot_rank[stockInfo.hot_rank.length - 1];
+                hotRankList.innerHTML = '';
+                const rankItem = document.createElement('div');
+                rankItem.className = 'hot-rank-item';
+                rankItem.innerHTML = `
+                    <span class="rank-time">${latestRank.time || '--'}</span>
+                    <span class="rank-value">第${latestRank.rank || 0}名</span>
+                `;
+                hotRankList.appendChild(rankItem);
+            } else {
+                hotRankList.innerHTML = '<div class="hot-rank-item">暂无数据</div>';
+            }
         }
         
         const res = await fetch(`http://127.0.0.1:8000/api/kline?symbol=${processedSymbol}&period=daily&limit=500&include_realtime=true`);
@@ -2232,7 +2445,12 @@ document.getElementById('addWatchBtn').addEventListener('click', async () => {
                 name: stockInfo.name,
                 price: currentPrice,
                 change: currentChange,
-                turnoverRate: turnoverRate
+                turnoverRate: turnoverRate,
+                industry: stockInfo.industry || '行业信息暂不可用',
+                description: stockInfo.description || '股票描述暂不可用',
+                provincial: stockInfo.provincial_name || '省份信息暂不可用',
+                classi: stockInfo.classi_name || '分类信息暂不可用',
+                hot_rank: stockInfo.hot_rank || []
             };
 
             if(!watchlist.find(s=>s.code===processedSymbol)) {
