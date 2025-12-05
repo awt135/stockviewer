@@ -1,2599 +1,1482 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<title>A股自选 + K线图 V0.5版</title>
-<!-- 引入jQuery和Bootstrap -->
-<script src="jquery-3.6.0.min.js"></script>
-<link href="bootstrap.min.css" rel="stylesheet">
-<script src="bootstrap.bundle.min.js"></script>
-<style>
-    body { font-family: Arial; margin: 0; padding: 10px; }
-    #top-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-    
-    /* 左右布局容器 */
-    #main-container { 
-        display: flex; 
-        gap: 10px; 
-        height: calc(100vh - 100px); 
-    }
-    
-    #watchlist { 
-        border: 1px solid #ccc; 
-        width: 300px; 
-        padding: 5px; 
-        overflow-y: auto;
-        flex-shrink: 0;
-    }
-    
-    #watchlist table { width: 100%; border-collapse: collapse; }
-    #watchlist th, #watchlist td { border-bottom: 1px solid #eee; padding: 4px; text-align: left; }
-    
-    #chart-container { 
-        flex: 1; 
-        min-width: calc(100vw - 350px);
-        overflow-y: auto;
-    }
-    
-    #mainChart { width: 100%; height: 400px; }
-    #volumeChart, #macdChart, #rsiChart { width: 100%; height: 100px; margin-top: 10px; }
-    
-    .increase { color: #f53f3f; }
-    .decrease { color: #00b42a; }
-    .indicator-controls { margin: 10px 0; }
-    .indicator-controls label { margin-right: 15px; }
-    
-    /* 删除按钮样式 */
-    .delete-btn { 
-        background: #ff4d4f; 
-        color: white; 
-        border: none; 
-        border-radius: 3px; 
-        padding: 2px 6px; 
-        cursor: pointer; 
-        font-size: 12px;
-    }
-    .delete-btn:hover { background: #ff7875; }
-    
-    /* 自选股控制按钮样式 */
-    .watchlist-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 10px;
-    }
-    
-    .watchlist-controls {
-        display: flex;
-        gap: 5px;
-    }
-    
-    .refresh-btn, .auto-refresh-btn {
-        background: #1890ff;
-        color: white;
-        border: none;
-        border-radius: 3px;
-        padding: 4px 8px;
-        cursor: pointer;
-        font-size: 12px;
-    }
-    
-    .refresh-btn:hover, .auto-refresh-btn:hover {
-        background: #40a9ff;
-    }
-    
-    .auto-refresh-btn.active {
-        background: #52c41a;
-    }
-    
-    .auto-refresh-btn.active:hover {
-        background: #73d13d;
-    }
-    
-    .refresh-time {
-        font-size: 12px;
-        color: #666;
-        margin-bottom: 10px;
-        text-align: right;
-    }
-    
-    /* 图表区域样式 */
-    .chart-section { 
-        margin-bottom: 20px; 
-        border: 1px solid #e8e8e8; 
-        border-radius: 4px; 
-        padding: 10px; 
-        background: #fafafa;
-    }
-    
-    .chart-header {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    align-items: flex-start;
-    margin-bottom: 15px;
-    padding: 10px;
-    background: #f8f9fa;
-    border-radius: 8px;
-    border: 1px solid #e9ecef;
-    gap: 10px;
-}
+# file: app.py
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+import akshare as ak
+import pandas as pd
+import numpy as np
+import math
+import re
 
-.stock-title {
-    display: flex;
-    align-items: center;
-    gap: 15px;
-}
+app = FastAPI(title="A股K线API")
 
-.stock-name {
-    font-size: 20px;
-    font-weight: bold;
-    color: #1890ff;
-}
+# 允许跨域
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 或者指定前端地址 ["http://127.0.0.1:8080"]
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-.stock-code {
-    font-size: 16px;
-    color: #666;
-    background: #e6f7ff;
-    padding: 4px 8px;
-    border-radius: 4px;
-    border: 1px solid #91d5ff;
-}
 
-.stock-details {
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    margin-left: 15px;
-    flex: 1;
-    min-width: 0; /* 允许内容收缩 */
-}
+# ---------- 工具函数 ----------
+def clean_nan(obj):
+    """递归替换 NaN / inf 为 None"""
+    if isinstance(obj, dict):
+        return {k: clean_nan(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nan(v) for v in obj]
+    elif isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    else:
+        return obj
 
-.stock-industry {
-    font-size: 14px;
-    color: #1890ff;
-    background: #e6f7ff;
-    padding: 4px 8px;
-    border-radius: 4px;
-    border: 1px solid #91d5ff;
-    max-width: 600px;
-    white-space: normal;
-    word-wrap: break-word;
-    overflow: visible;
-    line-height: 1.4;
-}
+def calc_indicators(df):
+    # MA
+    df['ma5'] = df['close'].rolling(5).mean()
+    df['ma10'] = df['close'].rolling(10).mean()
+    df['ma20'] = df['close'].rolling(20).mean()
+    
+    # 多重移动平均线 (14,21,35,50,100,200)
+    df['ma14'] = df['close'].rolling(14).mean()
+    df['ma21'] = df['close'].rolling(21).mean()
+    df['ma35'] = df['close'].rolling(35).mean()
+    df['ma50'] = df['close'].rolling(50).mean()
+    df['ma100'] = df['close'].rolling(100).mean()
+    df['ma200'] = df['close'].rolling(200).mean()
+    
+    # BOLL (20,2)
+    df['bb_mid'] = df['ma20']
+    df['bb_std'] = df['close'].rolling(20).std()
+    df['bb_upper'] = df['bb_mid'] + 2*df['bb_std']
+    df['bb_lower'] = df['bb_mid'] - 2*df['bb_std']
+    
+    # MACD
+    exp12 = df['close'].ewm(span=12, adjust=False).mean()
+    exp26 = df['close'].ewm(span=26, adjust=False).mean()
+    df['macd_diff'] = exp12 - exp26
+    df['macd_signal'] = df['macd_diff'].ewm(span=9, adjust=False).mean()
+    df['macd_hist'] = df['macd_diff'] - df['macd_signal']
+    
+    # RSI
+    delta = df['close'].diff()
+    up = delta.clip(lower=0)
+    down = -1*delta.clip(upper=0)
+    roll_up = up.rolling(14).mean()
+    roll_down = down.rolling(14).mean()
+    df['rsi14'] = 100 - 100/(1 + roll_up/roll_down)
+    
+    # Stoch RSI (14,14,3,3)
+    df['stoch_rsi_k'], df['stoch_rsi_d'] = calc_stoch_rsi(df, rsi_period=14, stoch_period=14, k_smooth=3, d_smooth=3)
+    
+    # 超级趋势 Supertrend (10,3)
+    df['supertrend'] = calc_supertrend(df, period=10, multiplier=3)
+    
+    # 计算SKDJ指标
+    df['skdj_k'], df['skdj_d'] = calc_skdj(df)
+    
+    # 计算策略信号
+    df['td9_signal'] = calc_td9_strategy(df)
+    df['ema_signal'] = calc_ema_strategy(df)
+    df['super_band_signal'] = calc_super_band_strategy(df)
+    df['mk_resonance'] = calc_mk_resonance(df)
+    
+    # 计算OBV和MFI指标
+    df['obv'] = calc_obv(df)
+    df['mfi14'] = calc_mfi(df, period=14)
+    
+    # 计算CCI、ROC和Williams %R指标
+    df['cci20'] = calc_cci(df, period=20)
+    df['cci14'] = calc_cci(df, period=14)
+    df['roc10'] = calc_roc(df, period=10)
+    df['roc20'] = calc_roc(df, period=20)
+    df['williams_r14'] = calc_williams_r(df, period=14)
+    
+    # 计算KDJ指标（标准：9,3,3）
+    df['kdj_k'], df['kdj_d'], df['kdj_j'] = calc_kdj(df, n=9, m1=3, m2=3)
+    
+    # 计算TRIX指标（三重指数平滑）
+    df['trix'], df['trix_signal'] = calc_trix(df, period=12)
+    
+    # 计算BBI指标（多空指数）
+    df['bbi'] = calc_bbi(df)
+    
+    # 计算ZigZag指标（5%阈值）
+    df['zigzag_5'] = calc_zigzag(df, threshold_percent=5.0)
+    
+    # 计算ZigZag指标（7%阈值）
+    df['zigzag_7'] = calc_zigzag(df, threshold_percent=7.0)
+    
+    # 计算PIVOT枢轴点指标
+    pivot_points = calc_pivot_points(df)
+    df['pivot'] = [point['pivot'] for point in pivot_points]
+    df['resistance1'] = [point['resistance1'] for point in pivot_points]
+    df['resistance2'] = [point['resistance2'] for point in pivot_points]
+    df['support1'] = [point['support1'] for point in pivot_points]
+    df['support2'] = [point['support2'] for point in pivot_points]
+    
+    # 计算Donchian Channel唐奇安通道
+    dc_high, dc_low = calc_donchian_channel(df, period=20)
+    df['dc_high20'] = dc_high
+    df['dc_low20'] = dc_low
+    
+    # 填充NaN值，但保留策略信号中的0值（0表示无信号）
+    # 先保存策略信号列
+    strategy_columns = ['td9_signal', 'ema_signal', 'super_band_signal', 'mk_resonance']
+    strategy_data = {}
+    for col in strategy_columns:
+        strategy_data[col] = df[col].copy()
 
-.stock-concepts {
-    font-size: 14px;
-    color: #722ed1;
-    background: #f9f0ff;
-    padding: 4px 8px;
-    border-radius: 4px;
-    border: 1px solid #d3adf7;
-    max-width: 600px;
-    white-space: normal;
-    word-wrap: break-word;
-    overflow: visible;
-    line-height: 1.4;
-}
+    # 填充其他列的NaN值 (pandas新版本写法)
+    df = df.ffill().bfill()
 
-.stock-description {
-    font-size: 12px;
-    color: #8c8c8c;
-    background: #fafafa;
-    padding: 4px 8px;
-    border-radius: 4px;
-    border: 1px solid #d9d9d9;
-    max-width: 500px;
-    white-space: normal;
-    word-wrap: break-word;
-    overflow: visible;
-    line-height: 1.4;
-}
+    # 恢复策略信号列，确保0值不被填充为其他值
+    for col in strategy_columns:
+        df[col] = strategy_data[col]
+        # 只填充策略信号中的None值，保留0值
+        df[col] = df[col].fillna(0)
+    
+    return df
 
-.chart-controls {
-    display: flex;
-    align-items: center;
-    gap: 20px;
-}
-
-.chart-header h3 { 
-    margin: 0; 
-    color: #333; 
-    font-size: 16px;
-}
-
-.indicator-info { 
-    display: flex; 
-    gap: 15px; 
-    font-size: 12px; 
-    color: #666;
-}
-
-.indicator-info span { 
-    white-space: nowrap;
-}
+def calc_stoch_rsi(df, rsi_period=14, stoch_period=14, k_smooth=3, d_smooth=3):
+    """计算Stoch RSI指标"""
+    # 计算RSI
+    delta = df['close'].diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    roll_up = up.rolling(rsi_period).mean()
+    roll_down = down.rolling(rsi_period).mean()
+    rsi = 100 - 100 / (1 + roll_up / roll_down)
     
-    /* 指标选择器样式 */
-    .indicator-selector {
-        margin: 10px 0;
-        padding: 10px;
-        background: #f5f5f5;
-        border-radius: 4px;
-    }
+    # 计算Stoch RSI
+    stoch_rsi_k = []
+    stoch_rsi_d = []
     
-    .indicator-selector h4 {
-        margin: 0 0 10px 0;
-        color: #333;
-        font-size: 14px;
-    }
-    
-    .indicator-options {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-    }
-    
-    .indicator-option {
-        display: flex;
-        align-items: center;
-        gap: 5px;
-        font-size: 12px;
-    }
-    
-    /* 自选股选中效果 */
-    .watchlist-item {
-        cursor: pointer;
-        transition: all 0.2s ease;
-    }
-    
-    .watchlist-item:hover {
-        background-color: #f8f9fa;
-    }
-    
-    .watchlist-item.selected {
-        background-color: #e3f2fd;
-        border-left: 4px solid #1890ff;
-        font-weight: bold;
-    }
-    
-    .watchlist-item.loading {
-        background-color: #fff3cd;
-        position: relative;
-        overflow: hidden;
-    }
-    
-    .watchlist-item.loading::after {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: -100%;
-        width: 100%;
-        height: 100%;
-        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.6), transparent);
-        animation: loading 1.5s infinite;
-    }
-    
-    @keyframes loading {
-        0% { left: -100%; }
-        100% { left: 100%; }
-    }
-    
-    /* 加载状态样式 */
-    .loading-overlay {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(255,255,255,0.8);
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        z-index: 9999;
-        backdrop-filter: blur(2px);
-    }
-    
-    .loading-spinner {
-        width: 50px;
-        height: 50px;
-        border: 5px solid #f3f3f3;
-        border-top: 5px solid #1890ff;
-        border-radius: 50%;
-        animation: spin 1s linear infinite;
-    }
-    
-    @keyframes spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-    }
-    
-    .loading-text {
-        margin-top: 15px;
-        color: #1890ff;
-        font-size: 16px;
-        font-weight: bold;
-    }
-    
-    /* 浮动信息标签样式 */
-    .crosshair-info {
-        position: absolute;
-        background: rgba(0, 0, 0, 0.85);
-        color: white;
-        padding: 8px 12px;
-        border-radius: 4px;
-        font-size: 12px;
-        font-family: 'Courier New', monospace;
-        pointer-events: none;
-        z-index: 1000;
-        min-width: 180px;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        backdrop-filter: blur(4px);
-        display: none;
-    }
-    
-    .crosshair-info .info-row {
-        display: flex;
-        justify-content: space-between;
-        margin: 2px 0;
-        line-height: 1.3;
-    }
-    
-    .crosshair-info .info-label {
-        color: #ccc;
-        margin-right: 10px;
-        min-width: 60px;
-    }
-    
-    .crosshair-info .info-value {
-        color: white;
-        font-weight: bold;
-        text-align: right;
-        flex: 1;
-    }
-    
-    .crosshair-info .increase {
-        color: #f53f3f;
-    }
-    
-    .crosshair-info .decrease {
-        color: #00b42a;
-    }
-    
-    .crosshair-info .date-row {
-        border-bottom: 1px solid rgba(255, 255, 255, 0.2);
-        padding-bottom: 4px;
-        margin-bottom: 4px;
-        font-weight: bold;
-    }
-    
-    /* 主图容器相对定位，用于浮动标签定位 */
-    #mainChart {
-        position: relative;
-    }
-    
-    /* 股票详情信息样式 */
-    .stock-details {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 15px;
-        margin: 5px 0;
-        font-size: 12px;
-        color: #666;
-    }
-    
-    .stock-details span {
-        background: #f0f0f0;
-        padding: 2px 8px;
-        border-radius: 3px;
-        border-left: 3px solid #1890ff;
-    }
-    
-    /* 人气排名样式 */
-    .hot-rank-details {
-        margin: 10px 0;
-        padding: 8px;
-        background: #f8f9fa;
-        border-radius: 4px;
-        border: 1px solid #e9ecef;
-    }
-    
-    .hot-rank-header {
-        font-size: 12px;
-        font-weight: bold;
-        color: #495057;
-        margin-bottom: 5px;
-        border-bottom: 1px solid #dee2e6;
-        padding-bottom: 3px;
-    }
-    
-    .hot-rank-list {
-        display: flex;
-        flex-direction: column;
-        gap: 3px;
-    }
-    
-    .hot-rank-item {
-        display: flex;
-        justify-content: space-between;
-        font-size: 11px;
-        padding: 2px 5px;
-        background: white;
-        border-radius: 2px;
-        border: 1px solid #e9ecef;
-    }
-    
-    .hot-rank-item .rank-time {
-        color: #6c757d;
-    }
-    
-    .hot-rank-item .rank-value {
-        font-weight: bold;
-        color: #1890ff;
-    }
- </style>
- </head>
-<body>
-<div id="top-bar">
-    <input type="text" id="stockInput" placeholder="输入股票代码或名称">
-    <button id="searchBtn">查询</button>
-    <button id="addWatchBtn">加入自选</button>
-</div>
-
-<div id="indicator-controls" class="indicator-controls">
-    <label><input type="checkbox" id="showLabels" checked> 标签开关</label>
-    <label><input type="checkbox" id="showMacd" checked> 显示MACD</label>
-    <label><input type="checkbox" id="showRsi" checked> 显示RSI</label>
-    <label><input type="checkbox" id="showSkdj" checked> 显示SKDJ</label>
-    <label><input type="checkbox" id="showKdj" checked> 显示KDJ</label>
-    <label><input type="checkbox" id="showTrix" checked> 显示TRIX</label>
-    <label><input type="checkbox" id="showBbi" checked> 显示BBI</label>
-    <label><input type="checkbox" id="showMk" checked> 显示MK共振</label>
-    <label><input type="checkbox" id="showStrategy" checked> 显示策略信号</label>
-    <label><input type="checkbox" id="showVol" checked> 显示成交量</label>
-    <label><input type="checkbox" id="showObv" checked> 显示OBV</label>
-    <label><input type="checkbox" id="showMfi" checked> 显示MFI</label>
-    <label><input type="checkbox" id="showCci" checked> 显示CCI</label>
-    <label><input type="checkbox" id="showRoc" checked> 显示ROC</label>
-    <label><input type="checkbox" id="showWilliams" checked> 显示William %R</label>
-</div>
-
-<!-- 左右布局容器 -->
-<div id="main-container">
-    <!-- 左侧：自选列表 -->
-    <div id="watchlist">
-        <div class="watchlist-header">
-            <h3>自选列表</h3>
-            <div class="watchlist-controls">
-                <button id="refreshBtn" onclick="refreshWatchlist()" class="refresh-btn">刷新</button>
-                <button id="autoRefreshBtn" onclick="toggleAutoRefresh()" class="auto-refresh-btn">自动刷新</button>
-            </div>
-        </div>
-        <div id="lastRefreshTime" class="refresh-time">最后刷新: --</div>
-        <table id="watchlistTable" style="font-size: 12px;">
-            <thead>
-                <tr><th>代码</th><th>名称</th><th>价格</th><th>涨幅</th><th>操作</th></tr>
-            </thead>
-            <tbody></tbody>
-        </table>
-    </div>
-
-    <!-- 右侧：图表区域 -->
-    <div id="chart-container">
-        <!-- 主K线图 -->
-        <div class="chart-section">
-            <div class="chart-header">
-                <div class="stock-title">
-                    <span id="stockName" class="stock-name">--</span>
-                    <span id="stockCode" class="stock-code">--</span>
-                </div>
-                <div class="stock-details">
-                    <span id="stockIndustry" class="stock-industry">行业：--</span>
-                    <span id="stockConcepts" class="stock-concepts">概念：--</span>
-                    <span id="stockProvincial" class="stock-provincial">省份：--</span>
-                    <span id="stockClassi" class="stock-classi">分类：--</span>
-                    <span id="stockDescription" class="stock-description">描述：--</span>
-                </div>
-                <div class="hot-rank-details">
-                    <div class="hot-rank-header">
-                        <a href="#" id="currentRankLink" target="_blank" class="rank-link">最新人气排名</a>
-                    </div>
-                    <div id="hotRankList" class="hot-rank-list">
-                        <div class="hot-rank-item">暂无数据</div>
-                    </div>
-                </div>
-                <div class="chart-controls">
-                    <h3>K线图</h3>
-                    <div class="indicator-selector">
-                        <h4>主图指标显示控制</h4>
-                        <div class="indicator-options">
-                            <div class="indicator-option">
-                                <input type="checkbox" id="showBB" checked>
-                                <label for="showBB">布林带 BB(20,2)</label>
-                            </div>
-                            <div class="indicator-option">
-                                <input type="checkbox" id="showSupertrend" checked>
-                                <label for="showSupertrend">超级趋势(10,3)</label>
-                            </div>
-                            <div class="indicator-option">
-                                <input type="checkbox" id="showMultiMA" checked>
-                                <label for="showMultiMA">多重移动平均线</label>
-                            </div>
-                            <div class="indicator-option">
-                                <input type="checkbox" id="showZigZag" checked>
-                                <label for="showZigZag">ZigZag波段拐点</label>
-                            </div>
-                            <div class="indicator-option">
-                                <input type="checkbox" id="showPivot" checked>
-                                <label for="showPivot">PIVOT枢轴点</label>
-                            </div>
-                            <div class="indicator-option">
-                                <input type="checkbox" id="showDonchian" checked>
-                                <label for="showDonchian">唐奇安通道</label>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
+    for i in range(len(df)):
+        if i < stoch_period - 1:
+            stoch_rsi_k.append(None)
+            stoch_rsi_d.append(None)
+            continue
             
-            <div id="mainChart">
-                <div id="crosshairInfo" class="crosshair-info">
-                    <div class="info-row date-row">
-                        <span class="info-label">日期</span>
-                        <span class="info-value" id="crosshairDate">--</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">开盘</span>
-                        <span class="info-value" id="crosshairOpen">--</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">最高</span>
-                        <span class="info-value" id="crosshairHigh">--</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">最低</span>
-                        <span class="info-value" id="crosshairLow">--</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">收盘</span>
-                        <span class="info-value" id="crosshairClose">--</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">涨幅</span>
-                        <span class="info-value" id="crosshairChange">--</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">成交量</span>
-                        <span class="info-value" id="crosshairVolume">--</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">成交额</span>
-                        <span class="info-value" id="crosshairAmount">--</span>
-                    </div>
-                    <div class="info-row">
-                        <span class="info-label">换手率</span>
-                        <span class="info-value" id="crosshairTurnover">--</span>
-                    </div>
-                </div>
-            </div>
+        # 获取当前窗口内的RSI值
+        rsi_window = rsi.iloc[i-stoch_period+1:i+1]
+        rsi_min = rsi_window.min()
+        rsi_max = rsi_window.max()
+        
+        if rsi_max == rsi_min or pd.isna(rsi_max) or pd.isna(rsi_min):
+            stoch_rsi_k.append(None)
+        else:
+            stoch_rsi_k.append(((rsi.iloc[i] - rsi_min) / (rsi_max - rsi_min)) * 100)  # 乘以100转换为百分比形式
+    
+    # 平滑K线
+    stoch_rsi_k_smooth = []
+    for i in range(len(stoch_rsi_k)):
+        if i < k_smooth - 1:
+            stoch_rsi_k_smooth.append(None)
+        else:
+            window = stoch_rsi_k[i-k_smooth+1:i+1]
+            if any(x is None for x in window) or len(window) < k_smooth:
+                stoch_rsi_k_smooth.append(None)
+            else:
+                stoch_rsi_k_smooth.append(sum(window) / k_smooth)
+    
+    # 计算D线
+    for i in range(len(stoch_rsi_k_smooth)):
+        if i < d_smooth - 1 or len(stoch_rsi_k_smooth) < d_smooth:
+            stoch_rsi_d.append(None)
+        else:
+            window = stoch_rsi_k_smooth[i-d_smooth+1:i+1]
+            if any(x is None for x in window) or len(window) < d_smooth:
+                stoch_rsi_d.append(None)
+            else:
+                stoch_rsi_d.append(sum(window) / d_smooth)
+    
+    # 确保返回的数据长度与原始数据一致
+    while len(stoch_rsi_k_smooth) < len(df):
+        stoch_rsi_k_smooth.append(None)
+    while len(stoch_rsi_d) < len(df):
+        stoch_rsi_d.append(None)
+    
+    return stoch_rsi_k_smooth[:len(df)], stoch_rsi_d[:len(df)]
+
+def calc_supertrend(df, period=10, multiplier=3):
+    """计算超级趋势指标"""
+    # 计算ATR
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/period, adjust=False).mean()  # 使用指数移动平均替代简单移动平均
+    
+    # 计算超级趋势
+    hl2 = (df['high'] + df['low']) / 2
+    
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
+    
+    supertrend = []
+    prev_upper = None
+    prev_lower = None
+    prev_trend = None
+    
+    for i in range(len(df)):
+        if i < period:
+            supertrend.append(None)
+            continue
             
-            <div class="indicator-info">
-                <span>MA5: 5日移动平均线</span>
-                <span>MA10: 10日移动平均线</span>
-                <span>MA20: 20日移动平均线</span>
-                <span>BB(20,2): 布林带指标</span>
-                <span>Supertrend(10,3): 超级趋势</span>
-                <span>MA多重: 14,21,35,50,100,200</span>
-            </div>
-        </div>
+        current_upper = upper_band.iloc[i]
+        current_lower = lower_band.iloc[i]
         
-        <!-- 成交量图 -->
-        <div class="chart-section" id="volumeSection">
-            <div class="chart-header">
-                <h3>成交量</h3>
-                <div class="indicator-info">
-                    <span>红色: 上涨成交量</span>
-                    <span>绿色: 下跌成交量</span>
-                </div>
-            </div>
-            <div id="volumeChart"></div>
-        </div>
-        
-        <!-- MACD图 -->
-        <div class="chart-section" id="macdSection">
-            <div class="chart-header">
-                <h3>MACD (12,26,9)</h3>
-                <div class="indicator-info">
-                    <span>DIF: 快线 (紫色线)</span>
-                    <span>DEA: 慢线 (橙色线)</span>
-                    <span>MACD柱: 红绿实心/空心柱状图</span>
-                    <span>金叉: DIF上穿DEA (绿色标记)</span>
-                    <span>死叉: DIF下穿DEA (红色标记)</span>
-                </div>
-            </div>
-            <div id="macdChart"></div>
-        </div>
-        
-        <!-- Stoch RSI图 -->
-        <div class="chart-section" id="rsiSection">
-            <div class="chart-header">
-                <h3>Stoch RSI (14,14,3,3)</h3>
-                <div class="indicator-info">
-                    <span>Stoch RSI: 随机相对强弱指标</span>
-                    <span>K线: 快线</span>
-                    <span>D线: 慢线</span>
-                    <span>超买区: &gt;0.8</span>
-                    <span>超卖区: &lt;0.2</span>
-                </div>
-            </div>
-            <div id="rsiChart"></div>
-        </div>
-        
-        <!-- SKDJ图 -->
-        <div class="chart-section" id="skdjSection">
-            <div class="chart-header">
-                <h3>SKDJ (9,3)</h3>
-                <div class="indicator-info">
-                    <span>SKDJ: 随机指标</span>
-                    <span>K线: 快线 (蓝色)</span>
-                    <span>D线: 慢线 (橙色)</span>
-                    <span>超买区: >80</span>
-                    <span>超卖区: <20</span>
-                </div>
-            </div>
-            <div id="skdjChart"></div>
-        </div>
-
-        <!-- MK共振图 -->
-        <div class="chart-section" id="mkSection">
-            <div class="chart-header">
-                <h3>MK共振</h3>
-                <div class="indicator-info">
-                    <span>MK共振: 多指标共振信号</span>
-                    <span>金叉: 买入信号 (绿圆)</span>
-                    <span>死叉: 卖出信号 (红圆)</span>
-                    <span>强信号: 大圆表示</span>
-                </div>
-            </div>
-            <div id="mkChart"></div>
-        </div>
-
-        <!-- 策略信号图 -->
-        <div class="chart-section" id="strategySection">
-            <div class="chart-header">
-                <h3>策略信号</h3>
-                <div class="indicator-info">
-                    <span>TD9: 抄底做多战法 (紫色三角)</span>
-                    <span>EMA: EMA交易策略 (青色方块)</span>
-                    <span>超级波段: 超级波段追踪多头策略 (金色菱形)</span>
-                </div>
-            </div>
-            <div id="strategyChart"></div>
-        </div>
-
-        <!-- OBV图 -->
-        <div class="chart-section" id="obvSection">
-            <div class="chart-header">
-                <h3>OBV（能量潮）</h3>
-                <div class="indicator-info">
-                    <span>OBV: 成交量与价格关系的能量潮指标</span>
-                    <span>核心价值: 量价背离识别超准</span>
-                    <span>上涨无量: OBV不会上升 → 可提前识别假突破</span>
-                </div>
-            </div>
-            <div id="obvChart"></div>
-        </div>
-
-        <!-- MFI图 -->
-        <div class="chart-section" id="mfiSection">
-            <div class="chart-header">
-                <h3>MFI（资金流量指数）</h3>
-                <div class="indicator-info">
-                    <span>MFI: RSI与成交量的结合指标</span>
-                    <span>强势行情: MFI 80以上背离 → 见顶信号很可靠</span>
-                    <span>超买区: &gt;80 (红色)</span>
-                    <span>超卖区: &lt;20 (绿色)</span>
-                </div>
-            </div>
-            <div id="mfiChart"></div>
-        </div>
-
-        <!-- CCI图 -->
-        <div class="chart-section" id="cciSection">
-            <div class="chart-header">
-                <h3>CCI（商品通道指标）</h3>
-                <div class="indicator-info">
-                    <span>CCI20: 20日商品通道指标</span>
-                    <span>CCI14: 14日商品通道指标</span>
-                    <span>多头强势: CCI &gt; 100</span>
-                    <span>超卖区域: CCI &lt; -100</span>
-                    <span>核心价值: A股短线歼灭战核心指标</span>
-                </div>
-            </div>
-            <div id="cciChart"></div>
-        </div>
-
-        <!-- ROC图 -->
-        <div class="chart-section" id="rocSection">
-            <div class="chart-header">
-                <h3>ROC（变动率指标）</h3>
-                <div class="indicator-info">
-                    <span>ROC10: 10日变动率指标</span>
-                    <span>ROC20: 20日变动率指标</span>
-                    <span>用途: 衡量加速上涨或加速下跌</span>
-                    <span>特点: 非常适合打板风格筛选强势股</span>
-                </div>
-            </div>
-            <div id="rocChart"></div>
-        </div>
-
-        <!-- William %R图 -->
-        <div class="chart-section" id="williamsSection">
-            <div class="chart-header">
-                <h3>William %R（威廉指标）</h3>
-                <div class="indicator-info">
-                    <span>WR14: 14日威廉指标</span>
-                    <span>特点: 比RSI更敏感，适合追踪强势股回踩买点</span>
-                    <span>超买区: &lt; -20</span>
-                    <span>超卖区: &gt; -80</span>
-                </div>
-            </div>
-            <div id="williamsChart"></div>
-        </div>
-
-        <!-- KDJ图 -->
-        <div class="chart-section" id="kdjSection">
-            <div class="chart-header">
-                <h3>KDJ（随机指标）</h3>
-                <div class="indicator-info">
-                    <span>KDJ: 经典随机指标，适合短线交易</span>
-                    <span>K线: 快线 (蓝色)</span>
-                    <span>D线: 慢线 (橙色)</span>
-                    <span>J线: 超快线 (红色)</span>
-                    <span>超买区: &gt;80</span>
-                    <span>超卖区: &lt;20</span>
-                    <span>金叉死叉: K、D线的反转点对A股短线非常有用</span>
-                </div>
-            </div>
-            <div id="kdjChart"></div>
-        </div>
-
-        <!-- TRIX图 -->
-        <div class="chart-section" id="trixSection">
-            <div class="chart-header">
-                <h3>TRIX（三重指数平滑）</h3>
-                <div class="indicator-info">
-                    <span>TRIX: 三重指数平滑移动平均</span>
-                    <span>特点: 适合捕捉真正的"趋势反转点"</span>
-                    <span>优势: 比MACD更不容易被震荡骗线</span>
-                    <span>信号线: TRIX信号线 (橙色)</span>
-                    <span>金叉死叉: TRIX与信号线的交叉</span>
-                </div>
-            </div>
-            <div id="trixChart"></div>
-        </div>
-
-        <!-- BBI图 -->
-        <div class="chart-section" id="bbiSection">
-            <div class="chart-header">
-                <h3>BBI（多空指数）</h3>
-                <div class="indicator-info">
-                    <span>BBI: 多均线综合趋势线</span>
-                    <span>公式: (MA3 + MA6 + MA12 + MA24) / 4</span>
-                    <span>特点: A股民间非常常用的跟踪趋势线</span>
-                    <span>优势: 移动更圆润，过滤短期噪音</span>
-                    <span>用法: 作为多空分界线，价格在BBI之上为多头，之下为空头</span>
-                </div>
-            </div>
-            <div id="bbiChart"></div>
-        </div>
-
-
-
-    </div>
-</div>
-
-<script src="lightweight-charts.standalone.production.js"></script>
-<script>
-// 从localStorage加载自选股数据
-let watchlist = JSON.parse(localStorage.getItem('stockWatchlist')) || [];
-
-// 当前选中的股票代码
-let selectedStockCode = null;
-
-// 加载状态管理
-let isLoading = false;
-
-// 显示加载状态
-function showLoading() {
-    if (isLoading) return;
-    
-    isLoading = true;
-    const overlay = document.createElement('div');
-    overlay.className = 'loading-overlay';
-    overlay.id = 'loadingOverlay';
-    overlay.innerHTML = `
-        <div class="text-center">
-            <div class="loading-spinner"></div>
-            <div class="loading-text">正在加载数据...</div>
-        </div>
-    `;
-    document.body.appendChild(overlay);
-}
-
-// 隐藏加载状态
-function hideLoading() {
-    isLoading = false;
-    const overlay = document.getElementById('loadingOverlay');
-    if (overlay) {
-        overlay.remove();
-    }
-}
-
-// 选中股票并更新样式
-function selectStock(stockCode) {
-    // 移除之前选中的样式
-    $('.watchlist-item.selected').removeClass('selected');
-    $('.watchlist-item.loading').removeClass('loading');
-    
-    // 设置新的选中状态
-    selectedStockCode = stockCode;
-    
-    // 为当前选中的行添加选中样式
-    const rows = document.querySelectorAll('#watchlistTable tbody tr');
-    rows.forEach(row => {
-        const codeCell = row.cells[0];
-        if (codeCell && codeCell.textContent === stockCode.replace(/^(sh|sz)/i, '')) {
-            $(row).addClass('watchlist-item selected');
-        }
-    });
-}
-
-// 处理A股代码（添加sh/sz前缀）
-function processStockCode(code) {
-    // 移除可能存在的sh/sz前缀
-    code = code.replace(/^(sh|sz)/i, '').trim();
-    
-    // 根据股票代码规则添加前缀
-    if (/^[036]\d{5}$/.test(code)) {
-        // 6开头的是上证，0、3开头的是深证
-        if (code.startsWith('6')) {
-            return 'sh' + code;
-        } else {
-            return 'sz' + code;
-        }
-    }
-    return code; // 非A股代码保持原样
-}
-
-// 删除自选股
-function deleteWatchlistStock(code) {
-    if (confirm('确定要删除这只股票吗？')) {
-        watchlist = watchlist.filter(stock => stock.code !== code);
-        updateWatchlistTable();
-    }
-}
-
-// 获取实时股票数据并更新自选股表格
-async function updateWatchlistTable() {
-    const tbody = document.querySelector('#watchlistTable tbody');
-    
-    if (watchlist.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #999;">暂无自选股</td></tr>';
-        localStorage.setItem('stockWatchlist', JSON.stringify(watchlist));
-        return;
-    }
-    
-    // 显示加载状态
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #999;">正在获取实时数据...</td></tr>';
-    
-    try {
-        // 构建股票代码列表
-        const symbolList = watchlist.map(stock => stock.code).join(',');
-        
-        // 调用批量实时价格接口
-        const response = await fetch(`http://127.0.0.1:8000/api/realtime_prices?symbols=${symbolList}`);
-        const result = await response.json();
-        
-        if (!response.ok) {
-            throw new Error(result.error || '获取实时数据失败');
-        }
-        
-        const realtimeData = result.data || [];
-        
-        // 清空表格并重新填充
-        tbody.innerHTML = '';
-        
-        watchlist.forEach((stock, index) => {
-            const tr = document.createElement('tr');
+        if prev_upper is None or prev_lower is None:
+            supertrend_value = current_lower
+            trend = 1
+        else:
+            # 调整上轨
+            if current_upper < prev_upper or df['close'].iloc[i-1] > prev_upper:
+                upper_final = current_upper
+            else:
+                upper_final = prev_upper
             
-            // 查找对应的实时数据
-            const realtimeStock = realtimeData.find(item => item.symbol === stock.code);
+            # 调整下轨
+            if current_lower > prev_lower or df['close'].iloc[i-1] < prev_lower:
+                lower_final = current_lower
+            else:
+                lower_final = prev_lower
             
-            if (realtimeStock) {
-                // 使用实时数据
-                const changeClass = parseFloat(realtimeStock.change) >= 0 ? 'increase' : 'decrease';
-                const changeDisplay = parseFloat(realtimeStock.change) >= 0 ? `+${realtimeStock.change}%` : `${realtimeStock.change}%`;
+            # 确定趋势
+            if prev_trend == 1 and df['close'].iloc[i] <= lower_final:
+                trend = -1
+                supertrend_value = upper_final
+            elif prev_trend == -1 and df['close'].iloc[i] >= upper_final:
+                trend = 1
+                supertrend_value = lower_final
+            else:
+                trend = prev_trend
+                supertrend_value = lower_final if trend == 1 else upper_final
+        
+        supertrend.append(supertrend_value)
+        prev_upper = upper_final if 'upper_final' in locals() else current_upper
+        prev_lower = lower_final if 'lower_final' in locals() else current_lower
+        prev_trend = trend
+    
+    # 确保返回的数据长度与原始数据一致
+    while len(supertrend) < len(df):
+        supertrend.append(None)
+    
+    return supertrend[:len(df)]
+
+def calc_skdj(df, n=9, m=3):
+    """计算SKDJ指标"""
+    # 计算RSV值
+    rsv = []
+    for i in range(len(df)):
+        if i < n - 1:
+            rsv.append(None)
+        else:
+            low_n = df['low'].iloc[i-n+1:i+1].min()
+            high_n = df['high'].iloc[i-n+1:i+1].max()
+            if high_n == low_n:
+                rsv.append(50)
+            else:
+                rsv.append((df['close'].iloc[i] - low_n) / (high_n - low_n) * 100)
+    
+    # 计算K值和D值
+    k_values = []
+    d_values = []
+    
+    for i in range(len(rsv)):
+        if rsv[i] is None:
+            k_values.append(None)
+            d_values.append(None)
+        else:
+            if i == 0 or k_values[i-1] is None:
+                k_values.append(50)
+            else:
+                k_values.append(k_values[i-1] * 2/3 + rsv[i] * 1/3)
+            
+            if i < m - 1 or any(k is None for k in k_values[max(0, i-m+1):i+1]):
+                d_values.append(None)
+            else:
+                d_values.append(sum(k_values[max(0, i-m+1):i+1]) / min(m, i+1))
+    
+    return k_values, d_values
+
+def calc_td9_strategy(df):
+    """计算TD9抄底做多战法策略"""
+    td9_signals = []
+    
+    for i in range(len(df)):
+        if i < 8:
+            td9_signals.append(None)
+            continue
+        
+        # TD9策略：连续9个交易日收盘价低于前4个交易日的收盘价
+        is_td9_buy = True
+        for j in range(9):
+            if i - j < 4:
+                is_td9_buy = False
+                break
+            if df['close'].iloc[i-j] >= df['close'].iloc[i-j-4]:
+                is_td9_buy = False
+                break
+        
+        td9_signals.append(1 if is_td9_buy else 0)
+    
+    return td9_signals
+
+def calc_ema_strategy(df):
+    """计算EMA交易策略"""
+    # 计算EMA指标
+    ema_short = df['close'].ewm(span=12, adjust=False).mean()
+    ema_long = df['close'].ewm(span=26, adjust=False).mean()
+    
+    # 策略信号：EMA金叉死叉
+    ema_signals = []
+    for i in range(len(df)):
+        if i == 0:
+            ema_signals.append(0)
+        else:
+            if ema_short.iloc[i] > ema_long.iloc[i] and ema_short.iloc[i-1] <= ema_long.iloc[i-1]:
+                ema_signals.append(1)  # 金叉买入信号
+            elif ema_short.iloc[i] < ema_long.iloc[i] and ema_short.iloc[i-1] >= ema_long.iloc[i-1]:
+                ema_signals.append(-1)  # 死叉卖出信号
+            else:
+                ema_signals.append(0)  # 无信号
+    
+    return ema_signals
+
+def calc_super_band_strategy(df):
+    """计算超级波段追踪多头策略"""
+    # 使用布林带和RSI结合
+    bb_upper = df['bb_upper']
+    bb_lower = df['bb_lower']
+    rsi = df['rsi14']
+    
+    super_band_signals = []
+    
+    for i in range(len(df)):
+        if i == 0 or bb_upper.iloc[i] is None or bb_lower.iloc[i] is None or rsi.iloc[i] is None:
+            super_band_signals.append(0)
+            continue
+        
+        # 策略：价格突破布林带上轨且RSI<70为买入信号
+        if df['close'].iloc[i] > bb_upper.iloc[i] and rsi.iloc[i] < 70:
+            super_band_signals.append(1)
+        # 策略：价格跌破布林带下轨且RSI>30为卖出信号
+        elif df['close'].iloc[i] < bb_lower.iloc[i] and rsi.iloc[i] > 30:
+            super_band_signals.append(-1)
+        else:
+            super_band_signals.append(0)
+    
+    return super_band_signals
+
+def calc_mk_resonance(df):
+    """计算MK共振指标"""
+    mk_signals = []
+
+    for i in range(len(df)):
+        if i < 1 or any(pd.isna(df.iloc[i][col]) for col in ['macd_diff', 'macd_signal', 'rsi14', 'supertrend']):
+            mk_signals.append(0)
+            continue
+
+        # MK共振条件：多个指标同时发出同向信号
+        signals = []
+
+        # MACD金叉
+        if (df['macd_diff'].iloc[i] > df['macd_signal'].iloc[i] and
+            df['macd_diff'].iloc[i-1] <= df['macd_signal'].iloc[i-1]):
+            signals.append(1)
+        # MACD死叉
+        elif (df['macd_diff'].iloc[i] < df['macd_signal'].iloc[i] and
+              df['macd_diff'].iloc[i-1] >= df['macd_signal'].iloc[i-1]):
+            signals.append(-1)
+        else:
+            signals.append(0)
+
+        # RSI超买超卖信号
+        if df['rsi14'].iloc[i] > 80:
+            signals.append(-1)  # 超买卖出
+        elif df['rsi14'].iloc[i] < 20:
+            signals.append(1)   # 超卖买入
+        else:
+            signals.append(0)
+
+        # 超级趋势信号
+        if df['close'].iloc[i] > df['supertrend'].iloc[i]:
+            signals.append(1)   # 趋势向上
+        elif df['close'].iloc[i] < df['supertrend'].iloc[i]:
+            signals.append(-1)  # 趋势向下
+        else:
+            signals.append(0)
+
+        # 计算共振强度：多个同向信号产生强信号
+        positive_signals = sum(1 for s in signals if s > 0)
+        negative_signals = sum(1 for s in signals if s < 0)
+
+        if positive_signals >= 2:
+            mk_signals.append(2)  # 强买入信号
+        elif positive_signals == 1:
+            mk_signals.append(1)  # 弱买入信号
+        elif negative_signals >= 2:
+            mk_signals.append(-2) # 强卖出信号
+        elif negative_signals == 1:
+            mk_signals.append(-1) # 弱卖出信号
+        else:
+            mk_signals.append(0)  # 无信号
+
+    return mk_signals
+
+def calc_obv(df):
+    """计算OBV（能量潮）指标，并进行归一化处理到0~100范围"""
+    obv_values = []
+    
+    for i in range(len(df)):
+        if i == 0:
+            # 第一天OBV等于当日成交量
+            obv_values.append(df['volume'].iloc[i])
+        else:
+            # 比较当日收盘价与前日收盘价
+            if df['close'].iloc[i] > df['close'].iloc[i-1]:
+                # 上涨：OBV累加当日成交量
+                obv_values.append(obv_values[i-1] + df['volume'].iloc[i])
+            elif df['close'].iloc[i] < df['close'].iloc[i-1]:
+                # 下跌：OBV累减当日成交量
+                obv_values.append(obv_values[i-1] - df['volume'].iloc[i])
+            else:
+                # 平盘：OBV保持不变
+                obv_values.append(obv_values[i-1])
+    
+    # 对OBV数据进行归一化处理到0~100范围
+    if obv_values:
+        min_obv = min(obv_values)
+        max_obv = max(obv_values)
+        
+        # 如果所有值都相同，则全部设为50
+        if max_obv == min_obv:
+            normalized_obv = [50.0] * len(obv_values)
+        else:
+            # 最小-最大归一化到0~100范围
+            normalized_obv = [(value - min_obv) / (max_obv - min_obv) * 100 for value in obv_values]
+        
+        return normalized_obv
+    
+    return obv_values
+
+def calc_mfi(df, period=14):
+    """计算MFI（资金流量指数）指标"""
+    # 计算典型价格
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    
+    # 计算原始资金流
+    raw_money_flow = typical_price * df['volume']
+    
+    # 计算正负资金流
+    positive_mf = []
+    negative_mf = []
+    
+    for i in range(len(df)):
+        if i == 0:
+            positive_mf.append(0)
+            negative_mf.append(0)
+        else:
+            if typical_price.iloc[i] > typical_price.iloc[i-1]:
+                positive_mf.append(raw_money_flow.iloc[i])
+                negative_mf.append(0)
+            elif typical_price.iloc[i] < typical_price.iloc[i-1]:
+                positive_mf.append(0)
+                negative_mf.append(raw_money_flow.iloc[i])
+            else:
+                positive_mf.append(0)
+                negative_mf.append(0)
+    
+    # 计算资金流比率
+    mfi_values = []
+    
+    for i in range(len(df)):
+        if i < period:
+            mfi_values.append(None)
+        else:
+            # 计算周期内的正负资金流总和
+            sum_positive = sum(positive_mf[i-period+1:i+1])
+            sum_negative = sum(negative_mf[i-period+1:i+1])
+            
+            if sum_negative == 0 and sum_positive == 0:
+                mfi_values.append(50)  # 中性值
+            elif sum_negative == 0:
+                mfi_values.append(100)
+            else:
+                money_ratio = sum_positive / sum_negative
+                mfi = 100 - (100 / (1 + money_ratio))
+                mfi_values.append(mfi)
+    
+    # 确保返回的数据长度与原始数据一致
+    while len(mfi_values) < len(df):
+        mfi_values.append(None)
+    
+    return mfi_values[:len(df)]
+
+def calc_cci(df, period=20):
+    """计算CCI（商品通道指标）"""
+    cci_values = []
+    
+    for i in range(len(df)):
+        if i < period - 1:
+            cci_values.append(None)
+        else:
+            # 计算典型价格
+            typical_price = (df['high'].iloc[i] + df['low'].iloc[i] + df['close'].iloc[i]) / 3
+            
+            # 计算周期内的典型价格移动平均
+            typical_prices = []
+            for j in range(period):
+                idx = i - j
+                if idx >= 0:  # 确保索引有效
+                    typical_prices.append((df['high'].iloc[idx] + df['low'].iloc[idx] + df['close'].iloc[idx]) / 3)
+            
+            # 检查是否有足够的数据
+            if len(typical_prices) < period:
+                cci_values.append(None)
+                continue
                 
-                // 移除股票代码前的sh/sz前缀
-                const displayCode = stock.code.replace(/^(sh|sz)/i, '');
+            sma_tp = sum(typical_prices) / period
+            
+            # 计算平均偏差
+            mean_deviation = 0
+            for tp in typical_prices:
+                mean_deviation += abs(tp - sma_tp)
+            mean_deviation /= period
+            
+            # 计算CCI
+            if mean_deviation == 0:
+                cci_values.append(0)
+            else:
+                cci = (typical_price - sma_tp) / (0.015 * mean_deviation)
+                cci_values.append(cci)
+    
+    # 确保返回的数据长度与原始数据一致
+    while len(cci_values) < len(df):
+        cci_values.append(None)
+    
+    return cci_values[:len(df)]
+
+def calc_roc(df, period=10):
+    """计算ROC（变动率指标）"""
+    roc_values = []
+    
+    for i in range(len(df)):
+        if i < period:
+            roc_values.append(None)
+        else:
+            # 计算变动率
+            current_price = df['close'].iloc[i]
+            past_price = df['close'].iloc[i - period]
+            
+            # 检查价格是否有效
+            if pd.isna(current_price) or pd.isna(past_price) or past_price == 0:
+                roc_values.append(0)
+            else:
+                roc = ((current_price - past_price) / past_price) * 100
+                roc_values.append(roc)
+    
+    # 确保返回的数据长度与原始数据一致
+    while len(roc_values) < len(df):
+        roc_values.append(None)
+    
+    return roc_values[:len(df)]
+
+def calc_williams_r(df, period=14):
+    """计算Williams %R（威廉指标）"""
+    williams_r_values = []
+    
+    for i in range(len(df)):
+        if i < period - 1:
+            williams_r_values.append(None)
+        else:
+            # 获取周期内的最高价和最低价
+            high_window = df['high'].iloc[i-period+1:i+1]
+            low_window = df['low'].iloc[i-period+1:i+1]
+            
+            # 检查数据是否有效
+            if high_window.isna().any() or low_window.isna().any():
+                williams_r_values.append(None)
+                continue
                 
-                tr.innerHTML = `
-                    <td>${displayCode}</td>
-                    <td>${stock.name}</td>
-                    <td class="${changeClass}">${realtimeStock.currentPrice}</td>
-                    <td class="${changeClass}">${changeDisplay}</td>
-                    <td><button class="delete-btn" onclick="deleteWatchlistStock('${stock.code}')">删除</button></td>
-                `;
-            } else {
-                // 如果没有实时数据，显示默认信息
-                // 移除股票代码前的sh/sz前缀
-                const displayCode = stock.code.replace(/^(sh|sz)/i, '');
+            highest_high = high_window.max()
+            lowest_low = low_window.min()
+            
+            # 计算Williams %R
+            if highest_high == lowest_low:
+                williams_r_values.append(-50)  # 避免除零错误
+            else:
+                williams_r = ((highest_high - df['close'].iloc[i]) / (highest_high - lowest_low)) * -100
+                williams_r_values.append(williams_r)
+    
+    # 确保返回的数据长度与原始数据一致
+    while len(williams_r_values) < len(df):
+        williams_r_values.append(None)
+    
+    return williams_r_values[:len(df)]
+
+def calc_kdj(df, n=9, m1=3, m2=3):
+    """计算KDJ指标（标准：9,3,3）"""
+    # 计算RSV值
+    rsv = []
+    for i in range(len(df)):
+        if i < n - 1:
+            rsv.append(None)
+        else:
+            low_n = df['low'].iloc[i-n+1:i+1].min()
+            high_n = df['high'].iloc[i-n+1:i+1].max()
+            if high_n == low_n:
+                rsv.append(50)
+            else:
+                rsv.append((df['close'].iloc[i] - low_n) / (high_n - low_n) * 100)
+    
+    # 计算K值、D值和J值
+    k_values = []
+    d_values = []
+    j_values = []
+    
+    for i in range(len(rsv)):
+        if rsv[i] is None:
+            k_values.append(None)
+            d_values.append(None)
+            j_values.append(None)
+        else:
+            # 计算K值（快速随机值）
+            if i == 0 or k_values[i-1] is None:
+                k_values.append(50)  # 初始值设为50
+            else:
+                k_values.append(k_values[i-1] * 2/3 + rsv[i] * 1/3)
+            
+            # 计算D值（慢速随机值）
+            if i < m1 - 1 or any(k is None for k in k_values[max(0, i-m1+1):i+1]):
+                d_values.append(None)
+            else:
+                d_values.append(sum(k_values[max(0, i-m1+1):i+1]) / min(m1, i+1))
+            
+            # 计算J值
+            if k_values[i] is None or d_values[i] is None:
+                j_values.append(None)
+            else:
+                j_values.append(3 * k_values[i] - 2 * d_values[i])
+    
+    return k_values, d_values, j_values
+
+def calc_trix(df, period=12):
+    """计算TRIX指标（三重指数平滑移动平均）"""
+    # 第一次指数平滑
+    ema1 = df['close'].ewm(span=period, adjust=False).mean()
+    
+    # 第二次指数平滑
+    ema2 = ema1.ewm(span=period, adjust=False).mean()
+    
+    # 第三次指数平滑
+    ema3 = ema2.ewm(span=period, adjust=False).mean()
+    
+    # 计算TRIX值
+    trix_values = []
+    for i in range(len(df)):
+        if i == 0 or pd.isna(ema3.iloc[i]) or pd.isna(ema3.iloc[i-1]):
+            trix_values.append(None)
+        else:
+            # TRIX = (当日三重指数平滑值 - 前一日三重指数平滑值) / 前一日三重指数平滑值 * 100
+            trix = (ema3.iloc[i] - ema3.iloc[i-1]) / ema3.iloc[i-1] * 100
+            trix_values.append(trix)
+    
+    # 计算TRIX的移动平均线（信号线）
+    trix_signal = []
+    for i in range(len(trix_values)):
+        if i < period - 1 or any(x is None for x in trix_values[max(0, i-period+1):i+1]):
+            trix_signal.append(None)
+        else:
+            signal = sum(trix_values[max(0, i-period+1):i+1]) / min(period, i+1)
+            trix_signal.append(signal)
+    
+    return trix_values, trix_signal
+
+def calc_bbi(df):
+    """计算BBI指标（多空指数） - 常用配置：BBI = (MA3 + MA6 + MA12 + MA24) / 4"""
+    # 计算不同周期的移动平均线
+    ma3 = df['close'].rolling(3).mean()
+    ma6 = df['close'].rolling(6).mean()
+    ma12 = df['close'].rolling(12).mean()
+    ma24 = df['close'].rolling(24).mean()
+    
+    # 计算BBI值
+    bbi_values = []
+    for i in range(len(df)):
+        if pd.isna(ma3.iloc[i]) or pd.isna(ma6.iloc[i]) or pd.isna(ma12.iloc[i]) or pd.isna(ma24.iloc[i]):
+            bbi_values.append(None)
+        else:
+            bbi = (ma3.iloc[i] + ma6.iloc[i] + ma12.iloc[i] + ma24.iloc[i]) / 4
+            bbi_values.append(bbi)
+    
+    return bbi_values
+
+def calc_zigzag(df, threshold_percent=5.0):
+    """计算ZigZag指标，用于识别波段拐点（参数：5%或7%）"""
+    if len(df) < 3:
+        return [None] * len(df)
+    
+    zigzag_values = [None] * len(df)
+    
+    # 寻找第一个有效的高低点
+    start_idx = 0
+    while start_idx < len(df) - 1:
+        if df['high'].iloc[start_idx] is not None and df['low'].iloc[start_idx] is not None:
+            break
+        start_idx += 1
+    
+    if start_idx >= len(df) - 1:
+        return zigzag_values
+    
+    # 初始化第一个点
+    last_extreme_idx = start_idx
+    last_extreme_value = df['high'].iloc[start_idx]
+    last_extreme_type = 'high'  # 'high' 或 'low'
+    
+    zigzag_values[start_idx] = last_extreme_value
+    
+    # 添加回溯验证的缓冲区
+    potential_highs = []
+    potential_lows = []
+    lookback_window = 5  # 回溯窗口大小
+    
+    for i in range(start_idx + 1, len(df)):
+        current_high = df['high'].iloc[i]
+        current_low = df['low'].iloc[i]
+        
+        if current_high is None or current_low is None:
+            continue
+        
+        # 记录潜在的高点和低点
+        if i >= lookback_window:
+            # 检查当前点是否是局部高点
+            is_local_high = True
+            for j in range(max(start_idx, i - lookback_window), i):
+                if df['high'].iloc[j] > current_high:
+                    is_local_high = False
+                    break
+            if is_local_high:
+                potential_highs.append((i, current_high))
+            
+            # 检查当前点是否是局部低点
+            is_local_low = True
+            for j in range(max(start_idx, i - lookback_window), i):
+                if df['low'].iloc[j] < current_low:
+                    is_local_low = False
+                    break
+            if is_local_low:
+                potential_lows.append((i, current_low))
+        
+        # 计算相对于上一个极点的变化百分比
+        change_percent = abs((current_high - last_extreme_value) / last_extreme_value * 100)
+        
+        if last_extreme_type == 'high':
+            # 寻找低点 - 使用回溯验证
+            if potential_lows and potential_lows[-1][0] == i:
+                potential_low_idx, potential_low = potential_lows[-1]
+                low_change_percent = abs((last_extreme_value - potential_low) / last_extreme_value * 100)
                 
-                tr.innerHTML = `
-                    <td>${displayCode}</td>
-                    <td>${stock.name}</td>
-                    <td>--</td>
-                    <td>--</td>
-                    <td><button class="delete-btn" onclick="deleteWatchlistStock('${stock.code}')">删除</button></td>
-                `;
-            }
-            
-            tr.addEventListener('click', (e) => {
-                // 防止点击删除按钮时触发股票查询
-                if (e.target.tagName !== 'BUTTON') {
-                    selectStock(stock.code);
-                    loadKline(stock.code);
-                }
-            });
-            tbody.appendChild(tr);
-        });
-        
-        // 更新最后刷新时间
-        updateLastRefreshTime();
-        
-    } catch (error) {
-        console.error('获取实时数据失败:', error);
-        
-        // 显示错误信息
-        tbody.innerHTML = '';
-        watchlist.forEach((stock, index) => {
-            const tr = document.createElement('tr');
-            
-            // 移除股票代码前的sh/sz前缀
-            const displayCode = stock.code.replace(/^(sh|sz)/i, '');
-            
-            tr.innerHTML = `
-                <td>${displayCode}</td>
-                <td>${stock.name}</td>
-                <td>--</td>
-                <td>--</td>
-                <td><button class="delete-btn" onclick="deleteWatchlistStock('${stock.code}')">删除</button></td>
-            `;
-            tr.addEventListener('click', (e) => {
-                if (e.target.tagName !== 'BUTTON') {
-                    selectStock(stock.code);
-                    loadKline(stock.code);
-                }
-            });
-            tbody.appendChild(tr);
-        });
-    }
-    
-    // 保存到localStorage
-    localStorage.setItem('stockWatchlist', JSON.stringify(watchlist));
-}
-
-// 更新最后刷新时间
-function updateLastRefreshTime() {
-    const now = new Date();
-    const timeString = now.toLocaleTimeString('zh-CN');
-    const refreshTimeElement = document.getElementById('lastRefreshTime');
-    if (refreshTimeElement) {
-        refreshTimeElement.textContent = `最后刷新: ${timeString}`;
-    }
-}
-
-// 手动刷新自选股数据
-function refreshWatchlist() {
-    updateWatchlistTable();
-}
-
-// 定时刷新自选股数据（每10秒）
-let refreshInterval;
-function startAutoRefresh() {
-    // 清除现有定时器
-    if (refreshInterval) {
-        clearInterval(refreshInterval);
-    }
-    
-    // 设置定时刷新（每10秒）
-    refreshInterval = setInterval(() => {
-        updateWatchlistTable();
-    }, 10000);
-    
-    // 更新按钮状态
-    const autoRefreshBtn = document.getElementById('autoRefreshBtn');
-    if (autoRefreshBtn) {
-        autoRefreshBtn.textContent = '停止自动刷新';
-        autoRefreshBtn.classList.add('active');
-    }
-}
-
-function stopAutoRefresh() {
-    if (refreshInterval) {
-        clearInterval(refreshInterval);
-        refreshInterval = null;
-    }
-    
-    // 更新按钮状态
-    const autoRefreshBtn = document.getElementById('autoRefreshBtn');
-    if (autoRefreshBtn) {
-        autoRefreshBtn.textContent = '自动刷新';
-        autoRefreshBtn.classList.remove('active');
-    }
-}
-
-function toggleAutoRefresh() {
-    if (refreshInterval) {
-        stopAutoRefresh();
-    } else {
-        startAutoRefresh();
-    }
-}
-
-// 获取图表容器的宽度
-function getChartWidth() {
-    const chartContainer = document.getElementById('chart-container');
-    return chartContainer ? chartContainer.clientWidth - 20 : window.innerWidth - 320;
-}
-
-// 初始化主图
-const mainChart = LightweightCharts.createChart(document.getElementById('mainChart'), { 
-    width: getChartWidth(), 
-    height: 400,
-    layout: { textColor: '#333' },
-    grid: { 
-        vertLines: { visible: true, color: '#f0f0f0' }, 
-        horzLines: { visible: true, color: '#f0f0f0' }
-    },
-    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-    timeScale: { 
-        timeVisible: true, 
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-    leftPriceScale: {  visible: false },
-    rightPriceScale: { borderColor: '#d1d1d1',
-        visible: true, 
-        scaleMargins: { top: 0.1, bottom: 0.2 } 
-    },
-});
-
-// 设置红涨绿跌的蜡烛图样式
-const candleSeries = mainChart.addSeries(LightweightCharts.CandlestickSeries, {
-    upColor: '#f53f3f', // 涨 - 红色
-    downColor: '#00b42a', // 跌 - 绿色
-    borderVisible: false,
-    wickUpColor: '#f53f3f',
-    wickDownColor: '#00b42a',
-});
-
-// 添加主图指标系列
-const bbUpperSeries = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#ffa940', lineWidth: 1, title: 'BB上轨' });
-const bbLowerSeries = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#ffa940', lineWidth: 1, title: 'BB下轨' });
-const supertrendSeries = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#722ed1', lineWidth: 2, title: '超级趋势' });
-const ma14Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#13c2c2', lineWidth: 1, title: 'MA14' });
-const ma21Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#eb2f96', lineWidth: 1, title: 'MA21' });
-const ma35Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#52c41a', lineWidth: 1, title: 'MA35' });
-const ma50Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#fa8c16', lineWidth: 1, title: 'MA50' });
-const ma100Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#1890ff', lineWidth: 1, title: 'MA100' });
-const ma200Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#722ed1', lineWidth: 1, title: 'MA200' });
-
-// 添加新指标系列
-const zigzag5Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#fa541c', lineWidth: 2, title: 'ZigZag 5%', visible: false });
-const zigzag7Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#faad14', lineWidth: 2, title: 'ZigZag 7%', visible: false });
-const pivotSeries = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#722ed1', lineWidth: 1, title: 'PIVOT', visible: true });
-const resistance1Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#f53f3f', lineWidth: 1, title: '阻力1', visible: true });
-const resistance2Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#fa8c16', lineWidth: 1, title: '阻力2', visible: true });
-const support1Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#52c41a', lineWidth: 1, title: '支撑1', visible: true });
-const support2Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#13c2c2', lineWidth: 1, title: '支撑2', visible: true });
-const dcHigh20Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#faad14', lineWidth: 1, title: '唐奇安上轨', visible: false });
-const dcLow20Series = mainChart.addSeries(LightweightCharts.LineSeries, { color: '#13c2c2', lineWidth: 1, title: '唐奇安下轨', visible: false });
-
-// 初始化其他图表
-const volumeChart = LightweightCharts.createChart(document.getElementById('volumeChart'), { 
-    width: getChartWidth(), 
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: { 
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const volumeSeries = volumeChart.addSeries(LightweightCharts.HistogramSeries, { 
-    color: '#f53f3f', 
-    priceFormat: { type: 'volume' } 
-});
-
-const macdChart = LightweightCharts.createChart(document.getElementById('macdChart'), { 
-    width: getChartWidth(), 
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: { 
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const macdHistogramSeries = macdChart.addSeries(LightweightCharts.HistogramSeries, { color: '#52c41a', priceFormat: { type: 'price' } });
-const macdDiffSeries = macdChart.addSeries(LightweightCharts.LineSeries, { color: '#722ed1', lineWidth: 2, title: 'DIF' });
-const macdSignalSeries = macdChart.addSeries(LightweightCharts.LineSeries, { color: '#fa8c16', lineWidth: 2, title: 'DEA' });
-
-const rsiChart = LightweightCharts.createChart(document.getElementById('rsiChart'), { 
-    width: getChartWidth(), 
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: { 
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const stochRsiKSeries = rsiChart.addSeries(LightweightCharts.LineSeries, { color: 'blue', lineWidth: 1, title: 'Stoch RSI K' });
-const stochRsiDSeries = rsiChart.addSeries(LightweightCharts.LineSeries, { color: 'red', lineWidth: 1, title: 'Stoch RSI D' });
-
-// 初始化SKDJ图表
-const skdjChart = LightweightCharts.createChart(document.getElementById('skdjChart'), {
-    width: getChartWidth(),
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const skdjKSeries = skdjChart.addSeries(LightweightCharts.LineSeries, { color: '#1890ff', lineWidth: 1, title: 'SKDJ K' });
-const skdjDSeries = skdjChart.addSeries(LightweightCharts.LineSeries, { color: '#fa8c16', lineWidth: 1, title: 'SKDJ D' });
-
-// 初始化MK共振图表
-const mkChart = LightweightCharts.createChart(document.getElementById('mkChart'), {
-    width: getChartWidth(),
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const mkSeries = mkChart.addSeries(LightweightCharts.HistogramSeries, { color: '#52c41a', priceFormat: { type: 'price' } });
-
-// 初始化策略信号图表
-const strategyChart = LightweightCharts.createChart(document.getElementById('strategyChart'), {
-    width: getChartWidth(),
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const td9Series = strategyChart.addSeries(LightweightCharts.LineSeries, { color: '#722ed1', lineWidth: 2, title: 'TD9信号' });
-const emaStrategySeries = strategyChart.addSeries(LightweightCharts.LineSeries, { color: '#13c2c2', lineWidth: 2, title: 'EMA策略' });
-const superBandSeries = strategyChart.addSeries(LightweightCharts.LineSeries, { color: '#faad14', lineWidth: 2, title: '超级波段' });
-
-// 初始化OBV图表
-const obvChart = LightweightCharts.createChart(document.getElementById('obvChart'), {
-    width: getChartWidth(),
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const obvSeries = obvChart.addSeries(LightweightCharts.LineSeries, { color: '#1890ff', lineWidth: 2, title: 'OBV' });
-
-// 初始化MFI图表
-const mfiChart = LightweightCharts.createChart(document.getElementById('mfiChart'), {
-    width: getChartWidth(),
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const mfiSeries = mfiChart.addSeries(LightweightCharts.LineSeries, { color: '#fa8c16', lineWidth: 2, title: 'MFI14' });
-
-// 初始化CCI图表
-const cciChart = LightweightCharts.createChart(document.getElementById('cciChart'), {
-    width: getChartWidth(),
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const cci20Series = cciChart.addSeries(LightweightCharts.LineSeries, { color: '#1890ff', lineWidth: 1, title: 'CCI20' });
-const cci14Series = cciChart.addSeries(LightweightCharts.LineSeries, { color: '#fa8c16', lineWidth: 1, title: 'CCI14' });
-
-// 初始化ROC图表
-const rocChart = LightweightCharts.createChart(document.getElementById('rocChart'), {
-    width: getChartWidth(),
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const roc10Series = rocChart.addSeries(LightweightCharts.LineSeries, { color: '#722ed1', lineWidth: 1, title: 'ROC10' });
-const roc20Series = rocChart.addSeries(LightweightCharts.LineSeries, { color: '#13c2c2', lineWidth: 1, title: 'ROC20' });
-
-// 初始化William %R图表
-const williamsChart = LightweightCharts.createChart(document.getElementById('williamsChart'), {
-    width: getChartWidth(),
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const williamsR14Series = williamsChart.addSeries(LightweightCharts.LineSeries, { color: '#eb2f96', lineWidth: 1, title: 'William %R14' });
-
-// 初始化KDJ图表
-const kdjChart = LightweightCharts.createChart(document.getElementById('kdjChart'), {
-    width: getChartWidth(),
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const kdjKSeries = kdjChart.addSeries(LightweightCharts.LineSeries, { color: '#1890ff', lineWidth: 1, title: 'KDJ K' });
-const kdjDSeries = kdjChart.addSeries(LightweightCharts.LineSeries, { color: '#fa8c16', lineWidth: 1, title: 'KDJ D' });
-const kdjJSeries = kdjChart.addSeries(LightweightCharts.LineSeries, { color: '#f53f3f', lineWidth: 1, title: 'KDJ J' });
-
-// 初始化TRIX图表
-const trixChart = LightweightCharts.createChart(document.getElementById('trixChart'), {
-    width: getChartWidth(),
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const trixSeries = trixChart.addSeries(LightweightCharts.LineSeries, { color: '#722ed1', lineWidth: 2, title: 'TRIX' });
-const trixSignalSeries = trixChart.addSeries(LightweightCharts.LineSeries, { color: '#fa8c16', lineWidth: 1, title: 'TRIX信号线' });
-
-// 初始化BBI图表
-const bbiChart = LightweightCharts.createChart(document.getElementById('bbiChart'), {
-    width: getChartWidth(),
-    height: 100,
-    layout: { textColor: '#333' },
-    grid: { visible: false },
-    timeScale: {
-        timeVisible: true,
-        secondsVisible: false,
-        borderColor: '#d1d1d1',
-        fixLeftEdge: true,
-        fixRightEdge: true,
-        barSpacing: 6,
-        minBarSpacing: 3,
-    },
-});
-const bbiSeries = bbiChart.addSeries(LightweightCharts.LineSeries, { color: '#13c2c2', lineWidth: 2, title: 'BBI' });
-
-
-
-// 全局变量存储当前K线数据
-let currentKlineData = [];
-
-// 显示浮动信息标签
-function showCrosshairInfo(x, y, data) {
-    const crosshairInfo = document.getElementById('crosshairInfo');
-    if (!crosshairInfo || !data) return;
-    
-    // 调试：打印接收到的数据
-    console.log('浮动信息标签数据:', data);
-    
-    // 更新信息内容
-    document.getElementById('crosshairDate').textContent = data.date || '--';
-    document.getElementById('crosshairOpen').textContent = data.open ? data.open.toFixed(2) : '--';
-    document.getElementById('crosshairHigh').textContent = data.high ? data.high.toFixed(2) : '--';
-    document.getElementById('crosshairLow').textContent = data.low ? data.low.toFixed(2) : '--';
-    document.getElementById('crosshairClose').textContent = data.close ? data.close.toFixed(2) : '--';
-    
-    // 计算涨幅（正确的计算方式：使用昨收价作为基准）
-    let changePercent = '--';
-    let changeClass = '';
-    if (data.close && data.prev_close) {
-        // 正确的涨幅计算：收盘价相对于昨收价的涨跌幅
-        const change = ((data.close - data.prev_close) / data.prev_close * 100);
-        changePercent = (change >= 0 ? '+' : '') + change.toFixed(2) + '%';
-        changeClass = change >= 0 ? 'increase' : 'decrease';
-        
-        // 调试：打印涨幅计算数据
-        console.log('昨收价:', data.prev_close, '收盘价:', data.close, '涨幅:', changePercent);
-    }
-    document.getElementById('crosshairChange').textContent = changePercent;
-    document.getElementById('crosshairChange').className = 'info-value ' + changeClass;
-    
-    // 格式化成交量
-    let volumeDisplay = '--';
-    if (data.volume) {
-        // 成交量需要除以100（因为后端返回的是股数，需要转换为手数）
-        const volume = parseFloat(data.volume) / 100;
-        // 调试：打印原始成交量数据
-        console.log('原始成交量:', data.volume, '除以100后:', volume);
-        
-        // 正确的单位转换：1亿=100000000，1万=10000
-        if (volume >= 100000000) {
-            volumeDisplay = (volume / 100000000).toFixed(2) + '亿';
-        } else if (volume >= 10000) {
-            volumeDisplay = (volume / 10000).toFixed(2) + '万';
-        } else {
-            volumeDisplay = volume.toLocaleString();
-        }
-        
-        // 调试：打印格式化后的成交量
-        console.log('格式化成交量:', volumeDisplay);
-    }
-    document.getElementById('crosshairVolume').textContent = volumeDisplay;
-    
-    // 格式化成交额（使用后端返回的turnover字段）
-    let amountDisplay = '--';
-    if (data.turnover) {
-        const amount = parseFloat(data.turnover);
-        if (amount >= 100000000) {
-            amountDisplay = (amount / 100000000).toFixed(2) + '亿';
-        } else if (amount >= 10000) {
-            amountDisplay = (amount / 10000).toFixed(2) + '万';
-        } else {
-            amountDisplay = amount.toLocaleString();
-        }
-    }
-    document.getElementById('crosshairAmount').textContent = amountDisplay;
-    
-    // 格式化换手率（使用后端返回的turnover_rate字段）
-    let turnoverRateDisplay = '--';
-    if (data.turnover_rate) {
-        turnoverRateDisplay = data.turnover_rate.toFixed(2) + '%';
-    }
-    document.getElementById('crosshairTurnover').textContent = turnoverRateDisplay;
-
-    
-    // 显示标签并定位
-    crosshairInfo.style.display = 'block';
-    
-    // 计算位置，避免超出屏幕边界
-    const chartRect = document.getElementById('mainChart').getBoundingClientRect();
-    const infoRect = crosshairInfo.getBoundingClientRect();
-    
-    let posX = x + 10;
-    let posY = y + 10;
-    
-    // 检查右侧边界
-    if (posX + infoRect.width > chartRect.right) {
-        posX = x - infoRect.width - 10;
-    }
-    
-    // 检查底部边界
-    if (posY + infoRect.height > chartRect.bottom) {
-        posY = y - infoRect.height - 10;
-    }
-    
-    crosshairInfo.style.left = (posX - chartRect.left) + 'px';
-    crosshairInfo.style.top = (posY - chartRect.top) + 'px';
-}
-
-// 隐藏浮动信息标签
-function hideCrosshairInfo() {
-    const crosshairInfo = document.getElementById('crosshairInfo');
-    if (crosshairInfo) {
-        crosshairInfo.style.display = 'none';
-    }
-}
-
-// 根据鼠标位置查找对应的K线数据
-function findKlineDataAtPosition(logicalX) {
-    if (!currentKlineData.length) return null;
-    
-    // 获取时间轴范围
-    const timeScale = mainChart.timeScale();
-    const visibleRange = timeScale.getVisibleLogicalRange();
-    if (!visibleRange) return null;
-    
-    const { from, to } = visibleRange;
-    
-    // 计算当前逻辑位置对应的数据索引
-    // 逻辑坐标从0开始（最左边，时间最早），对应数据数组的第一个元素
-    // 逻辑坐标越大（向右移动），对应数据数组的索引越大（时间越新）
-    const dataIndex = Math.max(0, Math.min(currentKlineData.length - 1, Math.round(logicalX)));
-    
-    if (dataIndex >= 0 && dataIndex < currentKlineData.length) {
-        return currentKlineData[dataIndex];
-    }
-    
-    return null;
-}
-
-// 设置主图鼠标事件
-function setupMainChartMouseEvents() {
-    const chartContainer = document.getElementById('mainChart');
-    if (!chartContainer) return;
-    
-    // 鼠标移动事件
-    chartContainer.addEventListener('mousemove', (e) => {
-        const rect = chartContainer.getBoundingClientRect();
-        const mouseX = e.clientX - rect.left;
-        const mouseY = e.clientY - rect.top;
-        
-        // 将鼠标坐标转换为逻辑坐标
-        const timeScale = mainChart.timeScale();
-        const logicalX = timeScale.coordinateToLogical(mouseX);
-        
-        if (logicalX !== null) {
-            const data = findKlineDataAtPosition(logicalX);
-            if (data) {
-                showCrosshairInfo(e.clientX, e.clientY, data);
-            } else {
-                hideCrosshairInfo();
-            }
-        } else {
-            hideCrosshairInfo();
-        }
-    });
-    
-    // 鼠标离开图表区域时隐藏信息标签
-    chartContainer.addEventListener('mouseleave', () => {
-        hideCrosshairInfo();
-    });
-    
-    // 点击图表时也隐藏信息标签（避免遮挡）
-    chartContainer.addEventListener('click', () => {
-        hideCrosshairInfo();
-    });
-}
-
-// 请求 K线数据
-async function loadKline(symbol) {
-    try {
-        // 显示加载状态
-        showLoading();
-        
-        // 为当前选中的股票添加loading样式
-        if (selectedStockCode) {
-            const rows = document.querySelectorAll('#watchlistTable tbody tr');
-            rows.forEach(row => {
-                const codeCell = row.cells[0];
-                if (codeCell && codeCell.textContent === selectedStockCode.replace(/^(sh|sz)/i, '')) {
-                    $(row).addClass('loading');
-                }
-            });
-        }
-        
-        // 处理股票代码
-        const processedSymbol = processStockCode(symbol);
-        
-        // 获取股票基本信息
-        const stockInfoRes = await fetch(`http://127.0.0.1:8000/api/stock_info?symbol=${processedSymbol}`);
-        const stockInfoJson = await stockInfoRes.json();
-        
-        if (stockInfoRes.ok) {
-            const stockInfo = stockInfoJson.data;
-            
-            // 获取热门概念信息
-            let conceptsText = '概念信息暂不可用';
-            try {
-                const conceptsResponse = await fetch(`http://127.0.0.1:8000/api/stock_hot_keyword_em?symbol=${processedSymbol}`);
-                if (conceptsResponse.ok) {
-                    const conceptsJson = await conceptsResponse.json();
-                    console.log('概念接口返回数据:', conceptsJson);
+                if low_change_percent >= threshold_percent:
+                    # 验证这个低点是否有效（比后续几个点都低）
+                    is_valid_low = True
+                    for j in range(i + 1, min(len(df), i + 3)):  # 检查后续2个点
+                        if df['low'].iloc[j] < potential_low:
+                            is_valid_low = False
+                            break
                     
-                    // 支持多种数据结构
-                    if (conceptsJson && Array.isArray(conceptsJson) && conceptsJson.length > 0) {
-                        // 直接返回数组的情况
-                        const topConcepts = conceptsJson.slice(0, 3);
-                        conceptsText = topConcepts.map(item => item.概念名称 || item.concept_name || '未知概念').join('、');
-                    } else if (conceptsJson.data && conceptsJson.data.length > 0) {
-                        // 返回包含data字段的情况
-                        const topConcepts = conceptsJson.data.slice(0, 3);
-                        conceptsText = topConcepts.map(item => item.概念名称 || item.concept_name || '未知概念').join('、');
-                    } else if (conceptsJson && conceptsJson.length === 0) {
-                        conceptsText = '暂无概念数据';
-                    }
+                    if is_valid_low:
+                        zigzag_values[last_extreme_idx] = None  # 移除上一个极值点
+                        zigzag_values[i] = potential_low
+                        last_extreme_idx = i
+                        last_extreme_value = potential_low
+                        last_extreme_type = 'low'
+                        # 清空潜在低点列表
+                        potential_lows = []
+        else:
+            # 寻找高点 - 使用回溯验证
+            if potential_highs and potential_highs[-1][0] == i:
+                potential_high_idx, potential_high = potential_highs[-1]
+                high_change_percent = abs((potential_high - last_extreme_value) / last_extreme_value * 100)
+                
+                if high_change_percent >= threshold_percent:
+                    # 验证这个高点是否有效（比后续几个点都高）
+                    is_valid_high = True
+                    for j in range(i + 1, min(len(df), i + 3)):  # 检查后续2个点
+                        if df['high'].iloc[j] > potential_high:
+                            is_valid_high = False
+                            break
                     
-                    console.log('最终概念文本:', conceptsText);
-                } else {
-                    console.error('概念接口请求失败:', conceptsResponse.status);
-                }
-            } catch (e) {
-                console.error('获取概念信息失败:', e);
+                    if is_valid_high:
+                        zigzag_values[last_extreme_idx] = None
+                        zigzag_values[i] = potential_high
+                        last_extreme_idx = i
+                        last_extreme_value = potential_high
+                        last_extreme_type = 'high'
+                        # 清空潜在高点列表
+                        potential_highs = []
+    
+    return zigzag_values
+
+def calc_pivot_points(df):
+    """计算PIVOT枢轴点（支撑阻力位）"""
+    pivot_points = []
+    
+    for i in range(len(df)):
+        if i == 0:
+            pivot_points.append({
+                'pivot': None,
+                'resistance1': None,
+                'resistance2': None,
+                'support1': None,
+                'support2': None
+            })
+            continue
+        
+        # 获取前一日的高、低、收盘价
+        prev_high = df['high'].iloc[i-1]
+        prev_low = df['low'].iloc[i-1]
+        prev_close = df['close'].iloc[i-1]
+        
+        if pd.isna(prev_high) or pd.isna(prev_low) or pd.isna(prev_close):
+            pivot_points.append({
+                'pivot': None,
+                'resistance1': None,
+                'resistance2': None,
+                'support1': None,
+                'support2': None
+            })
+            continue
+        
+        # 计算枢轴点
+        pivot = (prev_high + prev_low + prev_close) / 3
+        
+        # 计算阻力位
+        resistance1 = 2 * pivot - prev_low
+        resistance2 = pivot + (prev_high - prev_low)
+        
+        # 计算支撑位
+        support1 = 2 * pivot - prev_high
+        support2 = pivot - (prev_high - prev_low)
+        
+        pivot_points.append({
+            'pivot': pivot,
+            'resistance1': resistance1,
+            'resistance2': resistance2,
+            'support1': support1,
+            'support2': support2
+        })
+    
+    return pivot_points
+
+def calc_donchian_channel(df, period=20):
+    """计算Donchian Channel唐奇安通道"""
+    dc_high = []
+    dc_low = []
+    
+    for i in range(len(df)):
+        if i < period - 1:
+            dc_high.append(None)
+            dc_low.append(None)
+        else:
+            # 计算周期内的最高价和最低价
+            high_window = df['high'].iloc[i-period+1:i+1]
+            low_window = df['low'].iloc[i-period+1:i+1]
+            
+            # 检查数据是否有效
+            if high_window.isna().any() or low_window.isna().any():
+                dc_high.append(None)
+                dc_low.append(None)
+            else:
+                dc_high.append(high_window.max())
+                dc_low.append(low_window.min())
+    
+    return dc_high, dc_low
+
+# ---------- API ----------
+@app.get("/api/stock_info")
+async def stock_info(symbol: str):
+    """获取股票基本信息，包括中文名称"""
+    try:
+
+        #symbol 要去掉sh sz
+        #symbol = symbol.replace('sh', '').replace('sz', '')
+        # 使用akshare获取股票基本信息 - 使用不同的函数
+        # stock_info_df = ak.stock_individual_info_em(symbol=symbol) 东方财富在pc下不通
+        #使用 雪球获取股票基本信息
+        stock_info_df =ak.stock_individual_basic_info_xq(symbol)
+
+        
+               
+        # 检查数据是否有效
+        if stock_info_df is None or stock_info_df.empty:
+            # 尝试使用其他方法获取股票名称
+            try:
+                # 使用股票代码查询实时行情，获取名称
+                realtime_df = ak.stock_zh_a_spot_em()
+                if realtime_df is not None and not realtime_df.empty:
+                    stock_row = realtime_df[realtime_df['代码'] == symbol.replace('sh', '').replace('sz', '')]
+                    if not stock_row.empty:
+                        stock_name = stock_row['名称'].iloc[0]
+                    else:
+                        stock_name = symbol
+                else:
+                    stock_name = symbol
+            except:
+                stock_name = symbol
+            # 如果雪球接口失败，设置默认行业和描述信息
+            industry_info = "行业信息暂不可用"
+            stock_description = "股票描述暂不可用"
+            provincial_name = "省级信息暂不可用"
+            classi_name = "分类信息暂不可用"
+        else:
+            # 从原始数据中提取股票名称
+            try:
+                # 检查数据格式，尝试不同的列名
+                if 'item' in stock_info_df.columns and 'value' in stock_info_df.columns:
+                    name_row = stock_info_df[stock_info_df['item'] == 'org_short_name_cn']
+                    if not name_row.empty:
+                        stock_name = name_row['value'].iloc[0]
+                    else:
+                        stock_name = symbol
+                    
+                    # 提取行业信息 (affiliate_industry字段) - 只取ind_name对应的值
+                    industry_row = stock_info_df[stock_info_df['item'] == 'affiliate_industry']
+                    if not industry_row.empty:
+                        industry_data = industry_row['value'].iloc[0]
+                        # 处理行业信息格式，可能是JSON字符串或字典格式
+                        if isinstance(industry_data, str) and industry_data.startswith('{'):
+                            try:
+                                import json
+                                industry_dict = json.loads(industry_data)
+                                industry_info = industry_dict.get('ind_name', '未知行业')
+                            except:
+                                industry_info = industry_data
+                        else:
+                            industry_info = str(industry_data)
+                    else:
+                        industry_info = "行业信息暂不可用"
+                    
+                    # 提取股票描述 (main_operation_business字段)
+                    desc_row = stock_info_df[stock_info_df['item'] == 'main_operation_business']
+                    if not desc_row.empty:
+                        stock_description = desc_row['value'].iloc[0]
+                        if not stock_description or stock_description.strip() == "":
+                            stock_description = "主营业务信息暂不可用"
+                    else:
+                        stock_description = "主营业务信息暂不可用"
+                        
+                    # 提取省级名称 (provincial_name字段)
+                    provincial_row = stock_info_df[stock_info_df['item'] == 'provincial_name']
+                    if not provincial_row.empty:
+                        provincial_name = provincial_row['value'].iloc[0]
+                        if not provincial_name or provincial_name.strip() == "":
+                            provincial_name = "省级信息暂不可用"
+                    else:
+                        provincial_name = "省级信息暂不可用"
+                        
+                    # 提取分类名称 (classi_name字段)
+                    classi_row = stock_info_df[stock_info_df['item'] == 'classi_name']
+                    if not classi_row.empty:
+                        classi_name = classi_row['value'].iloc[0]
+                        if not classi_name or classi_name.strip() == "":
+                            classi_name = "分类信息暂不可用"
+                    else:
+                        classi_name = "分类信息暂不可用"
+                else:
+                    # 尝试直接获取第一行的名称信息
+                    stock_name = stock_info_df.iloc[0, 0] if len(stock_info_df.columns) > 0 else symbol
+                    industry_info = "行业信息暂不可用"
+                    stock_description = "股票描述暂不可用"
+                    provincial_name = "省级信息暂不可用"
+                    classi_name = "分类信息暂不可用"
+            except:
+                stock_name = symbol
+                industry_info = "行业信息暂不可用"
+                stock_description = "股票描述暂不可用"
+                provincial_name = "省级信息暂不可用"
+                classi_name = "分类信息暂不可用"
+        
+        # 获取人气排名数据（最近五天）
+        hot_rank_data = []
+        try:
+            # 转换股票代码格式为东方财富格式（如SZ000665）
+            if symbol.startswith('sh'):
+                xq_symbol = f"SH{symbol[2:]}"
+            elif symbol.startswith('sz'):
+                xq_symbol = f"SZ{symbol[2:]}"
+            else:
+                xq_symbol = symbol
+                
+            # 获取人气排名数据
+            hot_rank_df = ak.stock_hot_rank_detail_realtime_em(symbol=xq_symbol)
+            
+            if hot_rank_df is not None and not hot_rank_df.empty:
+                # 获取最近五天的数据
+                hot_rank_df = hot_rank_df.head(5)
+                
+                for index, row in hot_rank_df.iterrows():
+                    hot_rank_data.append({
+                        "time": str(row.iloc[0]) if len(row) > 0 else "",
+                        "rank": int(row.iloc[1]) if len(row) > 1 else 0
+                    })
+        except Exception as e:
+            print(f"获取人气排名数据失败: {e}")
+            # 人气排名数据获取失败不影响主要信息返回
+        
+        return JSONResponse(content={
+            "data": {
+                "symbol": symbol,
+                "name": stock_name,
+                "industry": industry_info,
+                "description": stock_description,
+                "provincial_name": provincial_name,
+                "classi_name": classi_name,
+                "hot_rank": hot_rank_data
             }
-            // 更新标题区域
-            document.getElementById('stockName').textContent = stockInfo.name;
-            document.getElementById('stockCode').textContent = processedSymbol;
+        })
+    
+    except Exception as e:
+        # 如果所有方法都失败，返回默认信息
+        return JSONResponse(content={
+            "data": {
+                "symbol": symbol,
+                "name": symbol  # 使用代码作为名称
+            }
+        })
+
+
+@app.get("/api/kline")
+async def kline(symbol: str, period: str = "daily", limit: int = 1000, include_realtime: bool = False):
+    try:
+        if period == "daily":
+            df = ak.stock_zh_a_daily(symbol=symbol,adjust="qfq")
+        elif period == "weekly":
+            df = ak.stock_zh_a_weekly(symbol=symbol,adjust="qfq")
+        else:
+            return JSONResponse(content={"error": "period must be daily or weekly"}, status_code=400)
+
+        df = df.tail(limit).copy()
+        
+        # 调试：打印原始数据长度和基本信息
+        print(f"原始数据长度: {len(df)}")
+        print(f"股票代码: {symbol}")
+        print(f"包含实时数据: {include_realtime}")
+        
+        # 如果需要包含实时数据
+        if include_realtime and period == "daily":
+            try:
+                import aiohttp
+                import datetime
+                
+                # 获取当日实时数据
+                clean_symbol = symbol.lower()
+                url = f"http://qt.gtimg.cn/q={clean_symbol}"
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            content = await response.text()
+                            
+                            # 解析腾讯接口数据
+                            data_match = re.search(r'v_[^=]+="([^"]+)"', content)
+                            if data_match:
+                                data_str = data_match.group(1)
+                                data_parts = data_str.split('~')
+                                
+                                if len(data_parts) >= 40:
+                                    # 获取当前日期
+                                    today = datetime.datetime.now().strftime('%Y-%m-%d')
+                                    
+                                    # 解析实时数据
+                                    current_price = float(data_parts[3]) if data_parts[3] else None
+                                    open_price = float(data_parts[5]) if data_parts[5] else None
+                                    high_price = float(data_parts[33]) if data_parts[33] else current_price
+                                    low_price = float(data_parts[34]) if data_parts[34] else current_price
+                                    volume = float(data_parts[6]) * 100 if data_parts[6] else 0  # 转换为股数
+                                    
+                                    # 检查是否有当日数据，避免重复
+                                    has_today_data = False
+                                    if 'date' in df.columns:
+                                        last_date = df['date'].iloc[-1] if len(df) > 0 else None
+                                        if last_date and str(last_date).startswith(today):
+                                            has_today_data = True
+                                    
+                                    # 如果当前价格有效且没有当日数据，则添加实时数据
+                                    if current_price and not has_today_data:
+                                        # 创建当日数据行
+                                        today_data = {
+                                            'date': today,
+                                            'open': open_price if open_price else current_price,
+                                            'high': high_price if high_price else current_price,
+                                            'low': low_price if low_price else current_price,
+                                            'close': current_price,
+                                            'volume': volume
+                                        }
+                                        
+                                        # 添加到DataFrame
+                                        today_df = pd.DataFrame([today_data])
+                                        df = pd.concat([df, today_df], ignore_index=True)
+                                        
+                                        print(f"已添加当日实时数据: {today} - 价格: {current_price}")
+                                    else:
+                                        print(f"跳过添加当日数据 - 已有当日数据: {has_today_data}, 当前价格: {current_price}")
+                            
+            except Exception as e:
+                print(f"获取实时数据失败: {e}")
+                # 实时数据获取失败不影响历史数据返回
+        
+        df = df.reset_index()
+
+        # 检查列名是否存在
+        col_mapping = {}
+        if '日期' in df.columns:
+            col_mapping['日期'] = 'date'
+        if '开盘' in df.columns:
+            col_mapping['开盘'] = 'open'
+        if '收盘' in df.columns:
+            col_mapping['收盘'] = 'close'
+        if '最高' in df.columns:
+            col_mapping['最高'] = 'high'
+        if '最低' in df.columns:
+            col_mapping['最低'] = 'low'
+        if '成交量' in df.columns:
+            col_mapping['成交量'] = 'volume'
+        if '换手率' in df.columns:
+            col_mapping['换手率'] = 'turnover_rate'
+        if 'turnover' in df.columns:
+            col_mapping['turnover'] = 'turnover_rate'
+
+        df.rename(columns=col_mapping, inplace=True)
+
+        df = calc_indicators(df)
+        
+        # 调试：检查策略信号列
+        td9_signals = df['td9_signal'].tolist()
+        ema_signals = df['ema_signal'].tolist()
+        super_band_signals = df['super_band_signal'].tolist()
+        
+        print(f"TD9信号非零数量: {sum(1 for x in td9_signals if x != 0)}")
+        print(f"EMA信号非零数量: {sum(1 for x in ema_signals if x != 0)}")
+        print(f"超级波段信号非零数量: {sum(1 for x in super_band_signals if x != 0)}")
+        
+        # 如果有非零信号，打印具体信息
+        for i, (td9, ema, sb) in enumerate(zip(td9_signals, ema_signals, super_band_signals)):
+            if td9 != 0 or ema != 0 or sb != 0:
+                print(f"第{i}行: TD9={td9}, EMA={ema}, 超级波段={sb}")
+
+        # 把日期转成字符串
+        if 'date' in df.columns:
+            df['date'] = df['date'].astype(str)
+
+        # 计算成交额（收盘价 * 成交量）
+        df['turnover'] = df['close'] * df['volume']
+        
+        # 处理换手率数据
+        # 优先使用akshare接口提供的换手率数据
+        if 'turnover_rate' not in df.columns:
+            # 如果akshare接口没有提供换手率，使用估算方法作为备选
+            # 方法1：使用平均成交量估算总股本
+            avg_volume = df['volume'].mean()
+            # 假设换手率在0.1%到10%之间，估算总股本
+            estimated_capital = avg_volume / 0.01  # 假设平均换手率为1%
             
-            // 更新概念信息
-            document.getElementById('stockConcepts').textContent = `概念：${conceptsText}`;
+            # 方法2：根据股票代码估算（大盘股总股本较大，小盘股较小）
+            # 6开头的是上证（大盘股较多），0、3开头的是深证（中小盘股较多）
+            if symbol.startswith('sh6') or symbol.startswith('sz000'):
+                # 大盘股，总股本较大（几十亿到几百亿）
+                base_capital = 1000000000  # 10亿股
+            else:
+                # 中小盘股，总股本较小（几亿到几十亿）
+                base_capital = 500000000   # 5亿股
             
-            // 更新行业、省份、分类信息（在一行显示）
-            // 行业信息只取ind_name的值，处理字符串格式的industry数据
-            let industryName = '行业信息暂不可用';
-            if (stockInfo.industry) {
-                try {
-                    // 尝试解析字符串格式的industry数据
-                    if (typeof stockInfo.industry === 'string' && stockInfo.industry.startsWith('{')) {
-                        const industryObj = JSON.parse(stockInfo.industry.replace(/'/g, '"'));
-                        industryName = industryObj.ind_name || industryName;
-                    } else if (stockInfo.industry.ind_name) {
-                        industryName = stockInfo.industry.ind_name;
-                    } else {
-                        industryName = stockInfo.industry;
+            # 结合两种方法，取较小值避免换手率过高
+            estimated_capital = min(estimated_capital, base_capital)
+            
+            # 确保总股本不为零
+            if estimated_capital <= 0:
+                estimated_capital = 100000000  # 默认1亿股
+            
+            # 计算估算换手率
+            df['turnover_rate'] = (df['volume'] / estimated_capital * 100).round(2)
+        else:
+            # 如果akshare接口提供了换手率数据，确保格式正确
+            # 有些接口的换手率可能是百分比格式（如0.23表示0.23%），需要转换为百分比数值
+            if df['turnover_rate'].max() < 1:
+                # 如果最大值小于1，可能是百分比格式，需要乘以100
+                df['turnover_rate'] = (df['turnover_rate'] * 100).round(2)
+            elif df['turnover_rate'].max() > 100:
+                # 如果最大值大于100，可能是原始数值，需要转换为百分比
+                df['turnover_rate'] = df['turnover_rate'].round(2)
+        
+        # 添加昨收价字段（前一天的收盘价）
+        df['prev_close'] = df['close'].shift(1)
+        # 第一天的昨收价用当天的开盘价代替
+        df.loc[0, 'prev_close'] = df.loc[0, 'open']
+
+        data = df[['date','open','high','low','close','prev_close','volume','turnover','turnover_rate','ma5','ma10','ma20','ma14','ma21','ma35','ma50','ma100','ma200',
+                   'bb_upper','bb_mid','bb_lower','macd_diff','macd_signal','macd_hist','rsi14','stoch_rsi_k','stoch_rsi_d','supertrend',
+                   'skdj_k','skdj_d','td9_signal','ema_signal','super_band_signal','mk_resonance','obv','mfi14',
+                   'cci20','cci14','roc10','roc20','williams_r14','kdj_k','kdj_d','kdj_j','trix','trix_signal','bbi',
+                   'zigzag_5','zigzag_7','pivot','resistance1','resistance2','support1','support2','dc_high20','dc_low20']].to_dict(orient='records')
+        return JSONResponse(content={"data": clean_nan(data)})
+    
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/api/stock_hot_keyword_em")
+async def stock_hot_keyword_em(symbol: str):
+    """获取股票的热门概念数据"""
+    try:
+        import akshare as ak
+        
+        # 调用akshare接口获取热门概念数据
+        df = ak.stock_hot_keyword_em(symbol=symbol)
+        
+        # 如果返回的是空DataFrame，返回空数组
+        if df.empty:
+            return JSONResponse(content={"data": []})
+        
+        # 转换为字典列表格式
+        data = df.to_dict(orient='records')
+        
+        return JSONResponse(content={"data": data})
+    
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/api/realtime_price")
+async def realtime_price(symbol: str):
+    """获取单个股票的实时价格数据"""
+    try:
+        import aiohttp
+        
+        # 处理股票代码格式（腾讯接口需要小写sh/sz前缀）
+        clean_symbol = symbol.lower()
+        
+        # 构建腾讯接口URL
+        url = f"http://qt.gtimg.cn/q={clean_symbol}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    return JSONResponse(content={"error": "获取实时数据失败"}, status_code=500)
+                
+                content = await response.text()
+                
+                # 解析腾讯接口返回的数据
+                # 格式示例：v_sz000858="51~五粮液液~000858~116.83~117.65~117.60~89756~33514~56224~116.83~21~116.82~47~116.81~100~116.80~201~116.79~82~116.84~31~116.85~44~116.86~35~116.87~53~116.88~26~~20251202135315~-0.82~-0.70~117.77~116.70~116.83/89756/1050761012~89756~105076~0.23~15.95~~117.77~116.70~0.91~4534.69~4534.88~3.18~129.42~105.89~1.16~262~117.07~15.81~14.24~~~0.77~105076.1012~0.0000~0~ ~GP-A~-13.00~-1.42~4.92~19.95~16.27~149.14~113.83~-2.93~-0.28~-9.34~3881444512~3881608005~40.94~-9.80~3881444512~~~-17.52~-0.04~~CNY~0~~116.75~354";
+                
+                # 提取数据部分
+                data_match = re.search(r'v_[^=]+="([^"]+)"', content)
+                if not data_match:
+                    return JSONResponse(content={"error": "数据格式错误"}, status_code=500)
+                
+                data_str = data_match.group(1)
+                data_parts = data_str.split('~')
+                
+                if len(data_parts) < 40:
+                    return JSONResponse(content={"error": "数据不完整"}, status_code=500)
+                
+                # 解析腾讯接口数据字段
+                # 字段说明：
+                # 0: 未知
+                # 1: 股票名称
+                # 2: 股票代码
+                # 3: 当前价格
+                # 4: 昨收
+                # 5: 今开
+                # 6: 成交量（手）
+                # 7: 外盘
+                # 8: 内盘
+                # 9: 买一价
+                # 10: 买一量
+                # ... 其他买卖盘数据
+                # 32: 涨跌额
+                # 33: 涨跌幅
+                # 34: 最高
+                # 35: 最低
+                
+                # 安全解析价格数据，处理可能的复合数据格式
+                def safe_float_parse(value):
+                    if not value:
+                        return 0
+                    # 如果包含斜杠，只取第一个部分
+                    if '/' in value:
+                        value = value.split('/')[0]
+                    try:
+                        return float(value)
+                    except (ValueError, TypeError):
+                        return 0
+                
+                def safe_int_parse(value):
+                    if not value:
+                        return 0
+                    # 如果包含斜杠，只取第一个部分
+                    if '/' in value:
+                        value = value.split('/')[0]
+                    try:
+                        return int(value)
+                    except (ValueError, TypeError):
+                        return 0
+                
+                stock_name = data_parts[1]
+                current_price = safe_float_parse(data_parts[3])
+                close_price = safe_float_parse(data_parts[4])
+                open_price = safe_float_parse(data_parts[5])
+                volume = safe_int_parse(data_parts[6]) * 100  # 转换为股数
+                change_amount = safe_float_parse(data_parts[31])  # 修正：涨跌额在第31个字段
+                change = safe_float_parse(data_parts[32])  # 修正：涨跌幅在第32个字段
+                high = safe_float_parse(data_parts[33])  # 修正：最高价在第33个字段
+                low = safe_float_parse(data_parts[34])  # 修正：最低价在第34个字段
+                
+                # 获取换手率（腾讯接口第38项）
+                turnover_rate = safe_float_parse(data_parts[37])  # 第38项（索引37）为换手率
+                    
+                # 计算成交额（如果接口不提供，可以估算）
+                turnover = current_price * volume if volume > 0 else 0
+                
+                return JSONResponse(content={
+                    "data": {
+                        "symbol": symbol,
+                        "name": stock_name,
+                        "currentPrice": current_price,
+                        "change": change,
+                        "changeAmount": change_amount,
+                        "volume": volume,
+                        "turnover": turnover,
+                        "turnoverRate": turnover_rate,  # 添加换手率字段
+                        "high": high,
+                        "low": low,
+                        "open": open_price,
+                        "close": close_price
                     }
-                } catch (e) {
-                    industryName = stockInfo.industry;
-                }
-            }
-            const provincialName = stockInfo.provincial_name || '省级信息暂不可用';
-            const classiName = stockInfo.classi_name || '分类信息暂不可用';
-            
-            // 将行业、省份、分类信息合并显示在一行
-            document.getElementById('stockIndustry').textContent = `行业：${industryName} | 省份：${provincialName} | 分类：${classiName}`;
-            
-            // 隐藏省份和分类的单独显示元素
-            document.getElementById('stockProvincial').style.display = 'none';
-            document.getElementById('stockClassi').style.display = 'none';
-            
-            // 更新股票描述
-            document.getElementById('stockDescription').textContent = `描述：${stockInfo.description || '股票描述暂不可用'}`;
-            
-            // 更新当前排名超链接
-            const currentRankLink = document.getElementById('currentRankLink');
-            const stockCode = processedSymbol.replace('sz', '').replace('sh', '');
-            currentRankLink.href = `https://guba.eastmoney.com/rank/stock?code=${stockCode}`;
-            
-            // 更新人气排名 - 只显示最新一条数据
-            const hotRankList = document.getElementById('hotRankList');
-            if (stockInfo.hot_rank && stockInfo.hot_rank.length > 0) {
-                // 取最后一条数据（最新排名）
-                const latestRank = stockInfo.hot_rank[stockInfo.hot_rank.length - 1];
-                hotRankList.innerHTML = '';
-                const rankItem = document.createElement('div');
-                rankItem.className = 'hot-rank-item';
-                rankItem.innerHTML = `
-                    <span class="rank-time">${latestRank.time || '--'}</span>
-                    <span class="rank-value">第${latestRank.rank || 0}名</span>
-                `;
-                hotRankList.appendChild(rankItem);
-            } else {
-                hotRankList.innerHTML = '<div class="hot-rank-item">暂无数据</div>';
-            }
-        }
-        
-        const res = await fetch(`http://127.0.0.1:8000/api/kline?symbol=${processedSymbol}&period=daily&limit=500&include_realtime=true`);
-        const json = await res.json();
-        const data = json.data;
-        
-        // 保存当前K线数据到全局变量
-        currentKlineData = data;
-
-        // 设置蜡烛图数据 - 红涨绿跌
-        candleSeries.setData(data.map(item => ({
-            time: item.date, 
-            open: item.open, 
-            high: item.high, 
-            low: item.low, 
-            close: item.close 
-        })));
-        
-        // 设置成交量数据 - 红涨绿跌
-        volumeSeries.setData(data.map(item => ({
-            time: item.date, 
-            value: item.volume, 
-            color: item.close >= item.open ? '#f53f3f' : '#00b42a' 
-        })));
-        
-        // 设置MACD数据 - 红绿实心/空心柱状图
-        const macdHistogramData = data.map((item, index) => {
-            let color, value = item.macd_hist;
-
-            // 设置红绿实心/空心样式
-            if (value >= 0) {
-                // MACD柱状图在0轴以上，显示为红色实心
-                color = '#f53f3f';
-            } else {
-                // MACD柱状图在0轴以下，显示为绿色实心
-                color = '#00b42a';
-            }
-
-            return { time: item.date, value, color };
-        });
-
-        // 设置DIF和DEA双曲线
-        macdHistogramSeries.setData(macdHistogramData);
-
-        // 设置DIF和DEA数据，并添加金叉死叉标记
-        const diffData = [];
-        const signalData = [];
-        const markers = [];
-
-        data.forEach((item, index) => {
-            const time = item.date;
-            const diffValue = item.macd_diff;
-            const signalValue = item.macd_signal;
-
-            diffData.push({ time, value: diffValue });
-            signalData.push({ time, value: signalValue });
-
-            // 检查金叉死叉
-            if (index > 0) {
-                const prevDiff = data[index - 1].macd_diff;
-                const prevSignal = data[index - 1].macd_signal;
-
-                // 金叉：DIF上穿DEA
-                if (diffValue > signalValue && prevDiff <= prevSignal) {
-                    markers.push({
-                        time,
-                        position: 'belowBar',
-                        color: '#52c41a',
-                        shape: 'circle',
-                        size: 2,
-                        text: '金叉',
-                    });
-                }
-                // 死叉：DIF下穿DEA
-                else if (diffValue < signalValue && prevDiff >= prevSignal) {
-                    markers.push({
-                        time,
-                        position: 'aboveBar',
-                        color: '#f53f3f',
-                        shape: 'circle',
-                        size: 2,
-                        text: '死叉',
-                    });
-                }
-            }
-        });
-
-        macdDiffSeries.setData(diffData);
-        macdSignalSeries.setData(signalData);
-
-        // MACD线图本身不支持标记，跳过标记功能
-        // macdDiffSeries.setMarkers(markers);
-        
-        // 设置主图指标数据
-        bbUpperSeries.setData(data.map(item => ({ time: item.date, value: item.bb_upper })));
-        bbLowerSeries.setData(data.map(item => ({ time: item.date, value: item.bb_lower })));
-        supertrendSeries.setData(data.map(item => ({ time: item.date, value: item.supertrend })));
-        ma14Series.setData(data.map(item => ({ time: item.date, value: item.ma14 })));
-        ma21Series.setData(data.map(item => ({ time: item.date, value: item.ma21 })));
-        ma35Series.setData(data.map(item => ({ time: item.date, value: item.ma35 })));
-        ma50Series.setData(data.map(item => ({ time: item.date, value: item.ma50 })));
-        ma100Series.setData(data.map(item => ({ time: item.date, value: item.ma100 })));
-        ma200Series.setData(data.map(item => ({ time: item.date, value: item.ma200 })));
-        
-        // 设置Stoch RSI数据
-        stochRsiKSeries.setData(data.map(item => ({ time: item.date, value: item.stoch_rsi_k })));
-        stochRsiDSeries.setData(data.map(item => ({ time: item.date, value: item.stoch_rsi_d })));
-
-        // 设置SKDJ数据
-        skdjKSeries.setData(data.map(item => ({ time: item.date, value: item.skdj_k })));
-        skdjDSeries.setData(data.map(item => ({ time: item.date, value: item.skdj_d })));
-
-        // 设置MK共振数据 - 使用后端计算的MK共振信号
-        const mkData = data.map((item, index) => {
-            let mkValue = item.mk_resonance || 0;
-            let mkColor = '#d9d9d9'; // 默认灰色
-
-            if (mkValue === 2) {
-                mkColor = '#52c41a'; // 强买入绿色
-                mkValue = 2;
-            } else if (mkValue === 1) {
-                mkColor = '#95de64'; // 弱买入浅绿
-                mkValue = 1;
-            } else if (mkValue === -2) {
-                mkColor = '#f53f3f'; // 强卖出红色
-                mkValue = -2;
-            } else if (mkValue === -1) {
-                mkColor = '#ff7875'; // 弱卖出浅红
-                mkValue = -1;
-            }
-
-            return { time: item.date, value: mkValue, color: mkColor };
-        });
-        mkSeries.setData(mkData);
-
-        // 设置策略信号数据 - 确保数据存在时才设置
-        if (data && data.length > 0) {
-            console.log('检查数据字段:', Object.keys(data[0] || {}));
-
-            const td9Data = data.map(item => ({ time: item.date, value: (item.td9_signal || 0) * 50 }));
-            const emaData = data.map(item => ({ time: item.date, value: (item.ema_signal || 0) * 50 }));
-            const superBandData = data.map(item => ({ time: item.date, value: (item.super_band_signal || 0) * 50 }));
-
-            console.log('策略数据:', {
-                td9Data: td9Data.filter(d => d.value !== 0),
-                emaData: emaData.filter(d => d.value !== 0),
-                superBandData: superBandData.filter(d => d.value !== 0)
-            });
-
-            // 只有当图表系列存在时才设置数据
-            if (td9Series && emaStrategySeries && superBandSeries) {
-                td9Series.setData(td9Data);
-                emaStrategySeries.setData(emaData);
-                superBandSeries.setData(superBandData);
-            }
-        }
-        
-        // 设置OBV数据
-        obvSeries.setData(data.map(item => ({
-            time: item.date,
-            value: item.obv || 0
-        })));
-        
-        // 设置MFI数据
-        mfiSeries.setData(data.map(item => ({
-            time: item.date,
-            value: item.mfi14 || 0
-        })));
-        
-        // 设置CCI数据
-        cci20Series.setData(data.map(item => ({
-            time: item.date,
-            value: item.cci20 || 0
-        })));
-        cci14Series.setData(data.map(item => ({
-            time: item.date,
-            value: item.cci14 || 0
-        })));
-        
-        // 设置ROC数据
-        roc10Series.setData(data.map(item => ({
-            time: item.date,
-            value: item.roc10 || 0
-        })));
-        roc20Series.setData(data.map(item => ({
-            time: item.date,
-            value: item.roc20 || 0
-        })));
-        
-        // 设置William %R数据
-        williamsR14Series.setData(data.map(item => ({
-            time: item.date,
-            value: item.williams_r14 || 0
-        })));
-        
-        // 设置KDJ数据
-        kdjKSeries.setData(data.map(item => ({
-            time: item.date,
-            value: item.kdj_k || 0
-        })));
-        kdjDSeries.setData(data.map(item => ({
-            time: item.date,
-            value: item.kdj_d || 0
-        })));
-        kdjJSeries.setData(data.map(item => ({
-            time: item.date,
-            value: item.kdj_j || 0
-        })));
-        
-        // 设置TRIX数据
-        trixSeries.setData(data.map(item => ({
-            time: item.date,
-            value: item.trix || 0
-        })));
-        trixSignalSeries.setData(data.map(item => ({
-            time: item.date,
-            value: item.trix_signal || 0
-        })));
-        
-        // 设置BBI数据
-        bbiSeries.setData(data.map(item => ({
-            time: item.date,
-            value: item.bbi || 0
-        })));
-        
-
-        
-        // 设置新指标数据
-        zigzag5Series.setData(data.map(item => ({
-            time: item.date,
-            value: item.zigzag_5 || 0
-        })));
-        zigzag7Series.setData(data.map(item => ({
-            time: item.date,
-            value: item.zigzag_7 || 0
-        })));
-        
-        // 设置PIVOT枢轴点数据 - 过滤掉None值
-        const pivotData = data.map(item => ({
-            time: item.date,
-            value: item.pivot
-        })).filter(item => item.value !== null && item.value !== undefined && item.value !== 0);
-        pivotSeries.setData(pivotData);
-        
-        const resistance1Data = data.map(item => ({
-            time: item.date,
-            value: item.resistance1
-        })).filter(item => item.value !== null && item.value !== undefined && item.value !== 0);
-        resistance1Series.setData(resistance1Data);
-        
-        const resistance2Data = data.map(item => ({
-            time: item.date,
-            value: item.resistance2
-        })).filter(item => item.value !== null && item.value !== undefined && item.value !== 0);
-        resistance2Series.setData(resistance2Data);
-        
-        const support1Data = data.map(item => ({
-            time: item.date,
-            value: item.support1
-        })).filter(item => item.value !== null && item.value !== undefined && item.value !== 0);
-        support1Series.setData(support1Data);
-        
-        const support2Data = data.map(item => ({
-            time: item.date,
-            value: item.support2
-        })).filter(item => item.value !== null && item.value !== undefined && item.value !== 0);
-        support2Series.setData(support2Data);
-        
-        dcHigh20Series.setData(data.map(item => ({
-            time: item.date,
-            value: item.dc_high20 || 0
-        })));
-        dcLow20Series.setData(data.map(item => ({
-            time: item.date,
-            value: item.dc_low20 || 0
-        })));
-        
-        // 同步所有图表的时间轴
-        const allCharts = [mainChart, volumeChart, macdChart, rsiChart, skdjChart, mkChart, strategyChart, obvChart, mfiChart, cciChart, rocChart, williamsChart, kdjChart, trixChart, bbiChart];
-        allCharts.forEach(chart => {
-            if (chart && chart.timeScale) {
-                chart.timeScale().scrollToPosition(0, true);
-            }
-        });
-        
-        // 设置所有附图的时间轴与主图同步
-        volumeChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        macdChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        rsiChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        skdjChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        mkChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        strategyChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        obvChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        mfiChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        cciChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        rocChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        williamsChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        
-        kdjChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        
-        trixChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        
-        bbiChart.timeScale().applyOptions({
-            timeVisible: true,
-            secondsVisible: false,
-        });
-        
-
-        
-        // 同步可见区域 - 双向联动
-        mainChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            volumeChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-
-        });
-        
-        // 附图时间轴变化时也同步到主图
-        volumeChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-        });
-
-        macdChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            volumeChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-        });
-
-        rsiChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            volumeChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-        });
-
-        skdjChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            volumeChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-        });
-
-        mkChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            volumeChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-        });
-
-        strategyChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            volumeChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-        });
-
-        obvChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            volumeChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-        });
-
-        mfiChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            volumeChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-        });
-
-        cciChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            volumeChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-        });
-
-        rocChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            volumeChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-        });
-
-        williamsChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            volumeChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-        });
-
-        kdjChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            volumeChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-        });
-
-        trixChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            volumeChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            bbiChart.timeScale().setVisibleRange(range);
-        });
-
-        bbiChart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-            mainChart.timeScale().setVisibleRange(range);
-            volumeChart.timeScale().setVisibleRange(range);
-            macdChart.timeScale().setVisibleRange(range);
-            rsiChart.timeScale().setVisibleRange(range);
-            skdjChart.timeScale().setVisibleRange(range);
-            mkChart.timeScale().setVisibleRange(range);
-            strategyChart.timeScale().setVisibleRange(range);
-            obvChart.timeScale().setVisibleRange(range);
-            mfiChart.timeScale().setVisibleRange(range);
-            cciChart.timeScale().setVisibleRange(range);
-            rocChart.timeScale().setVisibleRange(range);
-            williamsChart.timeScale().setVisibleRange(range);
-            kdjChart.timeScale().setVisibleRange(range);
-            trixChart.timeScale().setVisibleRange(range);
-        });
-        
-        // 数据设置完成后，同步所有图表的时间轴
-        setTimeout(() => {
-            syncAllCharts();
-        }, 100);
-        
-        // 设置交叉线同步
-        setupCrosshairSync();
-        
-    } catch (err) {
-        console.error('加载 K线数据失败', err);
-    } finally {
-        // 隐藏加载状态
-        hideLoading();
-        
-        // 移除loading样式
-        $('.watchlist-item.loading').removeClass('loading');
-    }
-}
-
-// 主图指标显示控制
-function updateMainChartIndicators() {
-    const showBB = document.getElementById('showBB').checked;
-    const showSupertrend = document.getElementById('showSupertrend').checked;
-    const showMultiMA = document.getElementById('showMultiMA').checked;
-    const showZigZag = document.getElementById('showZigZag').checked;
-    const showPivot = document.getElementById('showPivot').checked;
-    const showDonchian = document.getElementById('showDonchian').checked;
+                })
     
-    bbUpperSeries.applyOptions({ visible: showBB });
-    bbLowerSeries.applyOptions({ visible: showBB });
-    supertrendSeries.applyOptions({ visible: showSupertrend });
-    ma14Series.applyOptions({ visible: showMultiMA });
-    ma21Series.applyOptions({ visible: showMultiMA });
-    ma35Series.applyOptions({ visible: showMultiMA });
-    ma50Series.applyOptions({ visible: showMultiMA });
-    ma100Series.applyOptions({ visible: showMultiMA });
-    ma200Series.applyOptions({ visible: showMultiMA });
-    
-    // 新指标显示控制
-    zigzag5Series.applyOptions({ visible: showZigZag });
-    zigzag7Series.applyOptions({ visible: showZigZag });
-    pivotSeries.applyOptions({ visible: showPivot });
-    resistance1Series.applyOptions({ visible: showPivot });
-    resistance2Series.applyOptions({ visible: showPivot });
-    support1Series.applyOptions({ visible: showPivot });
-    support2Series.applyOptions({ visible: showPivot });
-    dcHigh20Series.applyOptions({ visible: showDonchian });
-    dcLow20Series.applyOptions({ visible: showDonchian });
-}
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
-// 指标标签显示控制
-function updateLabelsVisibility() {
-    const showLabels = document.getElementById('showLabels').checked;
-    
-    // 主图指标标签 - 只使用实际存在的变量
-    if (typeof bbUpperSeries !== 'undefined') bbUpperSeries.applyOptions({ title: showLabels ? 'BB上轨' : '' });
-    if (typeof bbLowerSeries !== 'undefined') bbLowerSeries.applyOptions({ title: showLabels ? 'BB下轨' : '' });
-    if (typeof supertrendSeries !== 'undefined') supertrendSeries.applyOptions({ title: showLabels ? '超级趋势' : '' });
-    if (typeof ma14Series !== 'undefined') ma14Series.applyOptions({ title: showLabels ? 'MA14' : '' });
-    if (typeof ma21Series !== 'undefined') ma21Series.applyOptions({ title: showLabels ? 'MA21' : '' });
-    if (typeof ma35Series !== 'undefined') ma35Series.applyOptions({ title: showLabels ? 'MA35' : '' });
-    if (typeof ma50Series !== 'undefined') ma50Series.applyOptions({ title: showLabels ? 'MA50' : '' });
-    if (typeof ma100Series !== 'undefined') ma100Series.applyOptions({ title: showLabels ? 'MA100' : '' });
-    if (typeof ma200Series !== 'undefined') ma200Series.applyOptions({ title: showLabels ? 'MA200' : '' });
-    if (typeof zigzag5Series !== 'undefined') zigzag5Series.applyOptions({ title: showLabels ? 'ZigZag5%' : '' });
-    if (typeof zigzag7Series !== 'undefined') zigzag7Series.applyOptions({ title: showLabels ? 'ZigZag7%' : '' });
-    if (typeof pivotSeries !== 'undefined') pivotSeries.applyOptions({ title: showLabels ? 'PIVOT' : '' });
-    if (typeof resistance1Series !== 'undefined') resistance1Series.applyOptions({ title: showLabels ? 'R1' : '' });
-    if (typeof resistance2Series !== 'undefined') resistance2Series.applyOptions({ title: showLabels ? 'R2' : '' });
-    if (typeof support1Series !== 'undefined') support1Series.applyOptions({ title: showLabels ? 'S1' : '' });
-    if (typeof support2Series !== 'undefined') support2Series.applyOptions({ title: showLabels ? 'S2' : '' });
-    if (typeof dcHigh20Series !== 'undefined') dcHigh20Series.applyOptions({ title: showLabels ? 'DC高' : '' });
-    if (typeof dcLow20Series !== 'undefined') dcLow20Series.applyOptions({ title: showLabels ? 'DC低' : '' });
-    
-    // 附图指标标签
-    if (typeof macdDiffSeries !== 'undefined') macdDiffSeries.applyOptions({ title: showLabels ? 'DIF' : '' });
-    if (typeof macdSignalSeries !== 'undefined') macdSignalSeries.applyOptions({ title: showLabels ? 'DEA' : '' });
-    
-    if (typeof stochRsiKSeries !== 'undefined') stochRsiKSeries.applyOptions({ title: showLabels ? 'Stoch RSI K' : '' });
-    if (typeof stochRsiDSeries !== 'undefined') stochRsiDSeries.applyOptions({ title: showLabels ? 'Stoch RSI D' : '' });
-    
-    if (typeof skdjKSeries !== 'undefined') skdjKSeries.applyOptions({ title: showLabels ? 'SKDJ K' : '' });
-    if (typeof skdjDSeries !== 'undefined') skdjDSeries.applyOptions({ title: showLabels ? 'SKDJ D' : '' });
-    
-    if (typeof td9Series !== 'undefined') td9Series.applyOptions({ title: showLabels ? 'TD9信号' : '' });
-    if (typeof emaStrategySeries !== 'undefined') emaStrategySeries.applyOptions({ title: showLabels ? 'EMA策略' : '' });
-    if (typeof superBandSeries !== 'undefined') superBandSeries.applyOptions({ title: showLabels ? '超级波段' : '' });
-    
-    if (typeof obvSeries !== 'undefined') obvSeries.applyOptions({ title: showLabels ? 'OBV' : '' });
-    if (typeof mfiSeries !== 'undefined') mfiSeries.applyOptions({ title: showLabels ? 'MFI14' : '' });
-    if (typeof cci20Series !== 'undefined') cci20Series.applyOptions({ title: showLabels ? 'CCI20' : '' });
-    if (typeof cci14Series !== 'undefined') cci14Series.applyOptions({ title: showLabels ? 'CCI14' : '' });
-    if (typeof roc10Series !== 'undefined') roc10Series.applyOptions({ title: showLabels ? 'ROC10' : '' });
-    if (typeof roc20Series !== 'undefined') roc20Series.applyOptions({ title: showLabels ? 'ROC20' : '' });
-    if (typeof williamsR14Series !== 'undefined') williamsR14Series.applyOptions({ title: showLabels ? 'William %R14' : '' });
-    
-    // 检查KDJ系列是否存在
-    if (typeof kdjKSeries !== 'undefined') kdjKSeries.applyOptions({ title: showLabels ? 'KDJ K' : '' });
-    if (typeof kdjDSeries !== 'undefined') kdjDSeries.applyOptions({ title: showLabels ? 'KDJ D' : '' });
-    if (typeof kdjJSeries !== 'undefined') kdjJSeries.applyOptions({ title: showLabels ? 'KDJ J' : '' });
-    
-    // 检查TRIX和BBI系列是否存在
-    if (typeof trixSeries !== 'undefined') trixSeries.applyOptions({ title: showLabels ? 'TRIX' : '' });
-    if (typeof trixSignalSeries !== 'undefined') trixSignalSeries.applyOptions({ title: showLabels ? 'TRIX信号线' : '' });
-    if (typeof bbiSeries !== 'undefined') bbiSeries.applyOptions({ title: showLabels ? 'BBI' : '' });
-}
 
-// 指标显示控制
-function updateIndicatorsVisibility() {
-    const showVol = document.getElementById('showVol').checked;
-    const showMacd = document.getElementById('showMacd').checked;
-    const showRsi = document.getElementById('showRsi').checked;
-    const showSkdj = document.getElementById('showSkdj').checked;
-    const showMk = document.getElementById('showMk').checked;
-    const showStrategy = document.getElementById('showStrategy').checked;
-    const showObv = document.getElementById('showObv').checked;
-    const showMfi = document.getElementById('showMfi').checked;
-    const showCci = document.getElementById('showCci').checked;
-    const showRoc = document.getElementById('showRoc').checked;
-    const showWilliams = document.getElementById('showWilliams').checked;
-    const showKdj = document.getElementById('showKdj').checked;
-    const showTrix = document.getElementById('showTrix').checked;
-    const showBbi = document.getElementById('showBbi').checked;
-
-    document.getElementById('volumeSection').style.display = showVol ? 'block' : 'none';
-    document.getElementById('macdSection').style.display = showMacd ? 'block' : 'none';
-    document.getElementById('rsiSection').style.display = showRsi ? 'block' : 'none';
-    document.getElementById('skdjSection').style.display = showSkdj ? 'block' : 'none';
-    document.getElementById('mkSection').style.display = showMk ? 'block' : 'none';
-    document.getElementById('strategySection').style.display = showStrategy ? 'block' : 'none';
-    document.getElementById('obvSection').style.display = showObv ? 'block' : 'none';
-    document.getElementById('mfiSection').style.display = showMfi ? 'block' : 'none';
-    document.getElementById('cciSection').style.display = showCci ? 'block' : 'none';
-    document.getElementById('rocSection').style.display = showRoc ? 'block' : 'none';
-    document.getElementById('williamsSection').style.display = showWilliams ? 'block' : 'none';
-    document.getElementById('kdjSection').style.display = showKdj ? 'block' : 'none';
-    document.getElementById('trixSection').style.display = showTrix ? 'block' : 'none';
-    document.getElementById('bbiSection').style.display = showBbi ? 'block' : 'none';
-}
-
-// 搜索按钮
-document.getElementById('searchBtn').addEventListener('click', () => {
-    const symbol = document.getElementById('stockInput').value.trim();
-    if(symbol) loadKline(symbol);
-});
-
-// 加入自选按钮
-document.getElementById('addWatchBtn').addEventListener('click', async () => {
-    const symbol = document.getElementById('stockInput').value.trim();
-    if(!symbol) return alert('请输入股票代码或名称');
-
-    // 处理股票代码
-    const processedSymbol = processStockCode(symbol);
-
-    try {
-        // 获取股票基本信息，包括中文名称
-        const stockInfoRes = await fetch(`http://127.0.0.1:8000/api/stock_info?symbol=${processedSymbol}`);
-        const stockInfoJson = await stockInfoRes.json();
-
-        if (stockInfoRes.ok) {
-            const stockInfo = stockInfoJson.data;
-
-            // 获取实时行情数据以获取真实价格和涨幅
-            const realtimeRes = await fetch(`http://127.0.0.1:8000/api/realtime_price?symbol=${processedSymbol}`);
-            const realtimeJson = await realtimeRes.json();
-
-            let currentPrice = '--';
-            let currentChange = '--';
-            let turnoverRate = '--';
-
-            if (realtimeRes.ok && realtimeJson.data) {
-                const realtimeData = realtimeJson.data;
-                currentPrice = realtimeData.currentPrice ? realtimeData.currentPrice.toFixed(2) : '--';
-                currentChange = realtimeData.change ? realtimeData.change + '%' : '--';
-                turnoverRate = realtimeData.turnoverRate ? realtimeData.turnoverRate + '%' : '--';
-            }
-
-            // 使用真实的价格、涨幅和换手率数据
-            const stock = {
-                code: processedSymbol,
-                name: stockInfo.name,
-                price: currentPrice,
-                change: currentChange,
-                turnoverRate: turnoverRate,
-                industry: stockInfo.industry || '行业信息暂不可用',
-                description: stockInfo.description || '股票描述暂不可用',
-                provincial: stockInfo.provincial_name || '省份信息暂不可用',
-                classi: stockInfo.classi_name || '分类信息暂不可用',
-                hot_rank: stockInfo.hot_rank || []
-            };
-
-            if(!watchlist.find(s=>s.code===processedSymbol)) {
-                watchlist.push(stock);
-                updateWatchlistTable();
-            } else {
-                alert('该股票已在自选列表中');
-            }
-        } else {
-            alert('获取股票信息失败: ' + stockInfoJson.error);
-        }
-    } catch (err) {
-        console.error('获取股票信息失败', err);
-        alert('获取股票信息失败，请检查网络连接');
-    }
-});
-
-// 主图指标显示控制事件
-document.getElementById('showBB').addEventListener('change', updateMainChartIndicators);
-document.getElementById('showSupertrend').addEventListener('change', updateMainChartIndicators);
-document.getElementById('showMultiMA').addEventListener('change', updateMainChartIndicators);
-document.getElementById('showZigZag').addEventListener('change', updateMainChartIndicators);
-document.getElementById('showPivot').addEventListener('change', updateMainChartIndicators);
-document.getElementById('showDonchian').addEventListener('change', updateMainChartIndicators);
-
-// 标签显示控制事件
-document.getElementById('showLabels').addEventListener('change', updateLabelsVisibility);
-
-// 指标显示控制事件
-document.getElementById('showVol').addEventListener('change', updateIndicatorsVisibility);
-document.getElementById('showMacd').addEventListener('change', updateIndicatorsVisibility);
-document.getElementById('showRsi').addEventListener('change', updateIndicatorsVisibility);
-document.getElementById('showSkdj').addEventListener('change', updateIndicatorsVisibility);
-document.getElementById('showMk').addEventListener('change', updateIndicatorsVisibility);
-document.getElementById('showStrategy').addEventListener('change', updateIndicatorsVisibility);
-document.getElementById('showObv').addEventListener('change', updateIndicatorsVisibility);
-document.getElementById('showMfi').addEventListener('change', updateIndicatorsVisibility);
-document.getElementById('showCci').addEventListener('change', updateIndicatorsVisibility);
-document.getElementById('showRoc').addEventListener('change', updateIndicatorsVisibility);
-document.getElementById('showWilliams').addEventListener('change', updateIndicatorsVisibility);
-document.getElementById('showKdj').addEventListener('change', updateIndicatorsVisibility);
-document.getElementById('showTrix').addEventListener('change', updateIndicatorsVisibility);
-document.getElementById('showBbi').addEventListener('change', updateIndicatorsVisibility);
-
-// 窗口大小变化时重新调整图表大小和联动
-window.addEventListener('resize', () => {
-    const chartWidth = getChartWidth();
-    const allCharts = [mainChart, volumeChart, macdChart, rsiChart, skdjChart, mkChart, strategyChart, obvChart, mfiChart, cciChart, rocChart, williamsChart, kdjChart, trixChart, bbiChart];
-
-    allCharts.forEach(chart => {
-        if (chart) {
-            chart.applyOptions({ width: chartWidth });
-        }
-    });
-
-    // 重新同步时间轴
-    syncAllCharts();
-});
-
-// 同步所有图表的时间轴
-function syncAllCharts() {
-    try {
-        const mainRange = mainChart.timeScale().getVisibleRange();
-        if (mainRange && mainRange.from !== null && mainRange.to !== null) {
-            const allCharts = [volumeChart, macdChart, rsiChart, skdjChart, mkChart, strategyChart, obvChart, mfiChart, cciChart, rocChart, williamsChart, kdjChart, trixChart, bbiChart];
-            allCharts.forEach(chart => {
-                if (chart && chart.timeScale) {
-                    try {
-                        chart.timeScale().setVisibleRange(mainRange);
-                    } catch (error) {
-                        console.warn('同步图表时间轴失败:', error);
-                    }
-                }
-            });
-        }
-    } catch (error) {
-        console.warn('获取主图时间轴范围失败:', error);
-    }
-}
-
-// 设置交叉线同步功能
-function setupCrosshairSync() {
-    // 定义所有需要同步的图表
-    const allCharts = [mainChart, volumeChart, macdChart, rsiChart, skdjChart, mkChart, strategyChart, obvChart, mfiChart, cciChart, rocChart, williamsChart, kdjChart, trixChart, bbiChart];
-    
-    // 为每个图表设置交叉线同步
-    allCharts.forEach(chart => {
-        if (!chart) return;
+@app.get("/api/realtime_prices")
+async def realtime_prices(symbols: str):
+    """批量获取多个股票的实时价格数据"""
+    try:
+        import aiohttp
         
-        // 订阅交叉线移动事件
-        chart.subscribeCrosshairMovement((param) => {
-            // 获取当前鼠标位置的时间点
-            const time = param.time;
-            
-            if (!time) return;
-            
-            // 同步所有其他图表到相同的时间点
-            allCharts.forEach(otherChart => {
-                if (otherChart && otherChart !== chart) {
-                    try {
-                        // 设置交叉线位置
-                        otherChart.setCrosshairPosition(param.point.x, param.point.y, param.series);
-                    } catch (error) {
-                        // 忽略同步错误
-                    }
-                }
-            });
-        });
-    });
-}
-
-// 初始化时不同步所有图表，等待数据加载完成后再同步
-// 同步操作将在loadKline函数的数据设置完成后执行
-
-// 监听主图时间轴变化，自动同步所有附图
-mainChart.timeScale().subscribeVisibleTimeRangeChange(syncAllCharts);
-
-// 添加键盘快捷键支持
-window.addEventListener('keydown', (e) => {
-    // 左右箭头键滚动时间轴
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-        e.preventDefault();
-        const scrollAmount = e.key === 'ArrowLeft' ? -1 : 1;
-        mainChart.timeScale().scrollByPosition(scrollAmount * 10, false);
-        syncAllCharts();
-    }
-
-    // +/- 键缩放时间轴
-    if (e.key === '+' || e.key === '-' || e.key === '=') {
-        e.preventDefault();
-        const zoomAmount = e.key === '+' || e.key === '=' ? 0.8 : 1.2;
-        mainChart.timeScale().applyOptions({
-            barSpacing: mainChart.timeScale().options().barSpacing * zoomAmount
-        });
-        syncAllCharts();
-    }
-});
-
-// 初始化时更新自选股表格
-updateWatchlistTable();
-
-// 初始化主图鼠标事件
-setupMainChartMouseEvents();
-</script>
-</body>
-</html>
+        # 分割股票代码（支持逗号分隔）
+        symbol_list = [s.strip() for s in symbols.split(',')]
+        
+        # 处理股票代码格式（腾讯接口需要小写sh/sz前缀）
+        clean_symbols = [symbol.lower() for symbol in symbol_list]
+        
+        # 构建腾讯接口URL（支持批量查询）
+        symbol_param = ','.join(clean_symbols)
+        url = f"http://qt.gtimg.cn/q={symbol_param}"
+        
+        results = []
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    return JSONResponse(content={"error": "获取实时数据失败"}, status_code=500)
+                
+                content = await response.text()
+                
+                # 腾讯接口返回多只股票数据，每只股票一行
+                lines = content.strip().split(';')
+                
+                for line in lines:
+                    if not line.strip():
+                        continue
+                        
+                    # 提取数据部分
+                    data_match = re.search(r'v_[^=]+="([^"]+)"', line)
+                    if not data_match:
+                        continue
+                    
+                    data_str = data_match.group(1)
+                    data_parts = data_str.split('~')
+                    
+                    if len(data_parts) < 40:
+                        continue
+                    
+                    # 解析腾讯接口数据字段
+                    stock_code = data_parts[2]  # 股票代码
+                    
+                    # 查找对应的原始symbol（保持原始大小写格式）
+                    original_symbol = None
+                    for sym in symbol_list:
+                        if sym.lower().replace('sh', '').replace('sz', '') == stock_code:
+                            original_symbol = sym
+                            break
+                    
+                    if not original_symbol:
+                        continue
+                    
+                    stock_name = data_parts[1]
+                    
+                    # 安全解析价格数据，处理可能的复合数据格式
+                    def safe_float_parse(value):
+                        if not value:
+                            return 0
+                        # 如果包含斜杠，只取第一个部分
+                        if '/' in value:
+                            value = value.split('/')[0]
+                        try:
+                            return float(value)
+                        except (ValueError, TypeError):
+                            return 0
+                    
+                    def safe_int_parse(value):
+                        if not value:
+                            return 0
+                        # 如果包含斜杠，只取第一个部分
+                        if '/' in value:
+                            value = value.split('/')[0]
+                        try:
+                            return int(value)
+                        except (ValueError, TypeError):
+                            return 0
+                    
+                    current_price = safe_float_parse(data_parts[3])
+                    close_price = safe_float_parse(data_parts[4])
+                    open_price = safe_float_parse(data_parts[5])
+                    volume = safe_int_parse(data_parts[6]) * 100  # 转换为股数
+                    change_amount = safe_float_parse(data_parts[31])  # 修正：涨跌额在第31个字段
+                    change = safe_float_parse(data_parts[32])  # 修正：涨跌幅在第32个字段
+                    high = safe_float_parse(data_parts[33])  # 修正：最高价在第33个字段
+                    low = safe_float_parse(data_parts[34])  # 修正：最低价在第34个字段
+                    
+                    # 获取换手率（腾讯接口第38项）
+                    turnover_rate = safe_float_parse(data_parts[37])  # 第38项（索引37）为换手率
+                    
+                    # 计算成交额
+                    turnover = current_price * volume if volume > 0 else 0
+                    
+                    results.append({
+                        "symbol": original_symbol,
+                        "name": stock_name,
+                        "currentPrice": current_price,
+                        "change": change,
+                        "changeAmount": change_amount,
+                        "volume": volume,
+                        "turnover": turnover,
+                        "turnoverRate": turnover_rate,  # 添加换手率字段
+                        "high": high,
+                        "low": low,
+                        "open": open_price,
+                        "close": close_price
+                    })
+        
+        return JSONResponse(content={"data": results})
+    
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
