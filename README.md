@@ -145,6 +145,6 @@ http://127.0.0.1:8001
 
 ##2025.12.25 更新内容
 
-替换数据源：将失效的 ak.stock_individual_basic_info_xq() 替换为腾讯接口 http://qt.gtimg.cn/q={symbol}
+替换数据源：将失效的 ak.stock_individual_basic_info_xq()  更新 pip install --upgrade akshare 至最新版本
 
 
