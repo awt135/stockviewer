@@ -904,57 +904,104 @@ def calc_donchian_channel(df, period=20):
 async def stock_info(symbol: str):
     """获取股票基本信息，包括中文名称"""
     try:
-        # 使用腾讯接口获取股票基本信息
-        import requests
-        import re
+
+        #symbol 要去掉sh sz
+        #symbol = symbol.replace('sh', '').replace('sz', '')
+        # 使用akshare获取股票基本信息 - 使用不同的函数
+        # stock_info_df = ak.stock_individual_info_em(symbol=symbol) 东方财富在pc下不通
+        #使用 雪球获取股票基本信息
+        stock_info_df =ak.stock_individual_basic_info_xq(symbol)
+
         
-        # 构建腾讯接口URL
-        url = f"http://qt.gtimg.cn/q={symbol}"
-        
-        # 发送请求获取数据
-        response = requests.get(url)
-        response.encoding = 'gbk'  # 设置正确的编码
-        content = response.text
-        
-        # 解析腾讯接口返回的数据
-        stock_name = symbol  # 默认使用代码作为名称
-        industry_info = "行业信息暂不可用"
-        stock_description = "股票描述暂不可用"
-        provincial_name = "省级信息暂不可用"
-        classi_name = "分类信息暂不可用"
-        
-        try:
-            # 提取以v_开头的字符串部分
-            match = re.search(r'v_[^=]+="([^"]+)"', content)
-            if match:
-                data_str = match.group(1)
-                data_parts = data_str.split('~')
-                
-                # 根据用户提供的信息，字段1是股票中文名称
-                if len(data_parts) >= 2:
-                    stock_name = data_parts[1]
-        except Exception as e:
-            print(f"解析腾讯接口数据失败: {e}")
-        
-        # 尝试使用akshare获取额外信息（如果腾讯接口不提供）
-        try:
-            # 使用东方财富获取股票基本信息作为补充
-            stock_info_df = ak.stock_individual_info_em(symbol=symbol.replace('sh', '').replace('sz', ''))
-            if stock_info_df is not None and not stock_info_df.empty:
-                # 尝试提取行业信息
-                if '所属行业' in stock_info_df.columns:
-                    industry_info = stock_info_df['所属行业'].iloc[0] if not stock_info_df['所属行业'].empty else "行业信息暂不可用"
-                elif 'industry' in stock_info_df.columns:
-                    industry_info = stock_info_df['industry'].iloc[0] if not stock_info_df['industry'].empty else "行业信息暂不可用"
-                
-                # 尝试提取股票描述
-                if '主营业务' in stock_info_df.columns:
-                    stock_description = stock_info_df['主营业务'].iloc[0] if not stock_info_df['主营业务'].empty else "主营业务信息暂不可用"
-                elif 'business' in stock_info_df.columns:
-                    stock_description = stock_info_df['business'].iloc[0] if not stock_info_df['business'].empty else "主营业务信息暂不可用"
-        except Exception as e:
-            print(f"获取额外信息失败: {e}")
-            # 不影响主流程，继续使用默认值
+               
+        # 检查数据是否有效
+        if stock_info_df is None or stock_info_df.empty:
+            # 尝试使用其他方法获取股票名称
+            try:
+                # 使用股票代码查询实时行情，获取名称
+                realtime_df = ak.stock_zh_a_spot_em()
+                if realtime_df is not None and not realtime_df.empty:
+                    stock_row = realtime_df[realtime_df['代码'] == symbol.replace('sh', '').replace('sz', '')]
+                    if not stock_row.empty:
+                        stock_name = stock_row['名称'].iloc[0]
+                    else:
+                        stock_name = symbol
+                else:
+                    stock_name = symbol
+            except:
+                stock_name = symbol
+            # 如果雪球接口失败，设置默认行业和描述信息
+            industry_info = "行业信息暂不可用"
+            stock_description = "股票描述暂不可用"
+            provincial_name = "省级信息暂不可用"
+            classi_name = "分类信息暂不可用"
+        else:
+            # 从原始数据中提取股票名称
+            try:
+                # 检查数据格式，尝试不同的列名
+                if 'item' in stock_info_df.columns and 'value' in stock_info_df.columns:
+                    name_row = stock_info_df[stock_info_df['item'] == 'org_short_name_cn']
+                    if not name_row.empty:
+                        stock_name = name_row['value'].iloc[0]
+                    else:
+                        stock_name = symbol
+                    
+                    # 提取行业信息 (affiliate_industry字段) - 只取ind_name对应的值
+                    industry_row = stock_info_df[stock_info_df['item'] == 'affiliate_industry']
+                    if not industry_row.empty:
+                        industry_data = industry_row['value'].iloc[0]
+                        # 处理行业信息格式，可能是JSON字符串或字典格式
+                        if isinstance(industry_data, str) and industry_data.startswith('{'):
+                            try:
+                                import json
+                                industry_dict = json.loads(industry_data)
+                                industry_info = industry_dict.get('ind_name', '未知行业')
+                            except:
+                                industry_info = industry_data
+                        else:
+                            industry_info = str(industry_data)
+                    else:
+                        industry_info = "行业信息暂不可用"
+                    
+                    # 提取股票描述 (main_operation_business字段)
+                    desc_row = stock_info_df[stock_info_df['item'] == 'main_operation_business']
+                    if not desc_row.empty:
+                        stock_description = desc_row['value'].iloc[0]
+                        if not stock_description or stock_description.strip() == "":
+                            stock_description = "主营业务信息暂不可用"
+                    else:
+                        stock_description = "主营业务信息暂不可用"
+                        
+                    # 提取省级名称 (provincial_name字段)
+                    provincial_row = stock_info_df[stock_info_df['item'] == 'provincial_name']
+                    if not provincial_row.empty:
+                        provincial_name = provincial_row['value'].iloc[0]
+                        if not provincial_name or provincial_name.strip() == "":
+                            provincial_name = "省级信息暂不可用"
+                    else:
+                        provincial_name = "省级信息暂不可用"
+                        
+                    # 提取分类名称 (classi_name字段)
+                    classi_row = stock_info_df[stock_info_df['item'] == 'classi_name']
+                    if not classi_row.empty:
+                        classi_name = classi_row['value'].iloc[0]
+                        if not classi_name or classi_name.strip() == "":
+                            classi_name = "分类信息暂不可用"
+                    else:
+                        classi_name = "分类信息暂不可用"
+                else:
+                    # 尝试直接获取第一行的名称信息
+                    stock_name = stock_info_df.iloc[0, 0] if len(stock_info_df.columns) > 0 else symbol
+                    industry_info = "行业信息暂不可用"
+                    stock_description = "股票描述暂不可用"
+                    provincial_name = "省级信息暂不可用"
+                    classi_name = "分类信息暂不可用"
+            except:
+                stock_name = symbol
+                industry_info = "行业信息暂不可用"
+                stock_description = "股票描述暂不可用"
+                provincial_name = "省级信息暂不可用"
+                classi_name = "分类信息暂不可用"
         
         # 获取人气排名数据（最近五天）
         hot_rank_data = []
